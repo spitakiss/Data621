@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/370964/c29f7632859044fe84580c6207adb19c
+bundleId: https://api.rpubs.com/api/v1/document/370964/c29f7632859044fe84580c6207adb19c
+url: http://rpubs.com/spitakiss/370964
+when: 1521403633.66474
