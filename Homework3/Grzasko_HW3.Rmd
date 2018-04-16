@@ -1,0 +1,1285 @@
+---
+title: 'Data 621: Homework 3'
+author: "Aaron Grzasko"
+date: "April 14, 2018"
+output:
+  html_document:
+    highlight: haddock
+    theme: cosmo
+  pdf_document: default
+subtitle: Binary Logistic Regression
+---  
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache=FALSE, comment=NA,
+                      fig.align='center',options(width = 110, digits=3))
+```  
+
+```{r}
+library(knitr)
+library(ggplot2)
+library(moments)
+library(ggthemes)
+library(qqplotr)
+library(gridExtra)
+library(car)
+library(geoR)
+library(alr3)
+library(rcompanion)
+library(sme)
+library(caret)
+library(pROC)
+```
+## Introduction 
+
+The objective of this assignment is to predict if a given neighborhood in Boston is likely to experience a high crime rate.  For categorical purposes, we define a neighborhood crime rate as "high" if it exceeds the citywide median crime rate.
+
+Because we are interested in making simple yes/no determinations, we will build various binary logistic regression models to make our predictions.       
+  
+We will train our models using a prescribed data set that captures a variety of metrics for each Boston neighborhood.
+
+
+## Data Exploration  
+  
+#### High Level Overview
+```{r}
+url <- 'https://raw.githubusercontent.com/spitakiss/Data621/master/Homework3/crime-training-data_modified.csv'  
+
+# read in data
+crime <- read.csv(url)
+```
+
+Our training data comprises 466 observations and 13 variables.  
+
+Below is a brief description of the variables in our data set:
+
+```{r echo=F}
+vname <- names(crime)
+vdesc <- c('proportion of residental land zoned for large lots (>25k sq ft)',
+           'proportion non-retail business acres per suburb',
+           'dummy variable indicating if suburb borders Charles River (1=y,0=n)',
+           'nitrogen oxide concentration (ppm)',
+           'avg rooms per dwelling',
+           'proportion of owner occupied units built prior to 1940',
+           'weighted mean distance to five Boston employemtn centers',
+           'index of accessibility to radial highways',
+           'full-value property tax per $10k',
+           'pupil-teacher ratio',
+           'lower status percentage of population',
+           'median value of owner-occupied homes',
+           'whether crime rate is above median (1=y, 0=n)'
+)
+vtyp <- c(rep('predictor',12),'response')
+
+var_df <- data.frame(vname, vdesc, vtyp, row.names = NULL)
+kable(var_df, col.names=c('Variable Name','Description','Variable Type'))
+```
+  
+Here are sample observations from the training data:  
+```{r}
+str(crime)
+```  
+  
+As expected, our response variable, `target`, is binary.  There is one binary variable, `chas`, among our predictor variables.  Four of the predictors are expressed as proportions, with values ranging from 0 to 100:  
+  
+* `indus`  
+* `indust`  
+* `age`  
+* `lstat`  
+  
+Two of the variables are dimensionless ratios:  
+  
+* `nox`: dimensionless measure, with theoretical values ranging from 0 to 10 million parts per 10 million.  
+* `ptratios`: pupil to teacher ratio, with a theoretical minimum of 1 and unbounded above.  
+  
+
+The variable `rad` is described as an index value of accessibility to radial highways.  We assume this variable is an ordinal data type. 
+0
+The remaining predictors provide a variety of count, distance, and monetary measures.  
+
+  
+Now, let's examine a brief descriptive summary of all of our variables:  
+```{r}
+options(digits=2, width=100)
+summary(crime)
+
+```
+  
+Surprisingly, we find no missing values in a data set.  Based on this high-level summary and variable descriptions, we see no immediately obvious data entry errors or suspicious observation.  
+  
+Let's take a closer look at each variable individually.  
+  
+  
+#### Response Variable: zn  
+  
+The proportion of residential land zoned for large lots, `zn` for short, is a variable with values ranging from 0 to 1.  The variable has a significant positive skew, as evident in the histogram, box plot, and qq plots below.  We also note that `r round(length(crime$zn[crime$zn==0]) / length(crime$zn),2)*100`% of observations (339 of 466 total) have a value of 0.  Furthermore, there appears to be relationship between crime rates and `zn`: 93%  of high crime areas have no land zoned for large lots.  On the other hand, only about half of low crime areas exclude large-lot zoning. This relationship is consistent with our intuition: large lots tend be concentrated in suburban areas with low crime rates, while areas with mostly small lots are concentrated in urban areas with higher crime rates.  Finally, the boxplots by crime type indicate a much higher variance of `zn` values for low crime neighborhoods compared to high crime areas.                
+  
+Here is a summarized table of observed `zn` observations, with values rounded to the nearest 5:  
+```{r}
+addmargins(table(5*round(crime$zn/5,0)))
+``` 
+  
+Below are summary statistics:
+
+```{r}
+with(crime, c(summary(zn), SD=sd(zn), Skew=skewness(zn), Kurt=kurtosis(zn)))
+
+```
+
+  
+Finally, here are relevant plots:
+```{r}
+h <- ggplot(crime, aes(zn)) + geom_histogram(fill = 'seagreen4', binwidth = 20, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of zn') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=zn)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of zn") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", zn)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of zn', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), zn)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of zn by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+
+```
+  
+<br>  
+
+#### Response Variable: indus 
+  
+The variable `indus` represents the proportion of non-retail business acres per suburb.  The histogram below indicates a bi-modal quality to the variable's distribution, with many values clustering in two ranges: the mid-to-upper single digits, and  the upper teens through low 20s.  
+While the distribution has a very mild positive skew, the kurtosis is significantly below that of a normal distribution.  In the final boxplot below, we see that high crime areas tend to have a higher industry concentration compared to low crime areas.  In contrast, the variances of industry concentration by crime-type are similar.  
+
+Let's look at summary table, with values rounded to the nearest percentage:  
+
+```{r}
+addmargins(table(round(crime$indus,0)))
+```  
+  
+Here are the summary statistics:    
+```{r}
+with(crime, c(summary(indus), SD=sd(indus), Skew=skewness(indus), Kurt=kurtosis(indus)))
+```
+  
+Lastly, below are the plots:  
+
+```{r}
+h <- ggplot(crime, aes(indus)) + geom_histogram(fill = 'seagreen4', binwidth = 5, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of indus') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=indus)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of indus") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", indus)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of indus', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), indus)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of indus by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+
+
+
+
+```
+  
+### Response Variable: chas  
+  
+The variable `chas` is binary with the value 1 indicating that the neighborhood borders the Charles River.  Only 7% of all neighborhoods (33 in total) border the river.  
+  
+Let's look at the summary of observations:
+  
+```{r}
+addmargins(table(crime$chas))
+``` 
+  
+Because this variable is binary, we will not produce the standard plots and summary statistics shown for previous variables.  
+
+However, we will still visually examine the relationship between `chas` and `target`, the categorical crime level:  
+ 
+
+```{r}
+ggplot(crime, aes(x=target, y=chas)) + geom_jitter(color='seagreen4') + theme_classic() + 
+  labs(title ='Jittered Scatter Plot of chas vs.target') + theme(plot.title = element_text(hjust = 0.5)) 
+
+```  
+  
+Here is a two-way table of the data depicted in the scatter plot:    
+```{r}
+addmargins(table(crime$chas, crime$target))
+
+```
+
+Of the areas bordering the Charles river, roughly two-thirds (or 21 total) are in high crime areas.  However, the differences in the proportions of high-crime areas by `chas` value do not appear appear to be statistically significant at the 95% level of significance.  This non significant result is likely due to the small sample size of the Charles-River bordering observations.  See below for the t-test details:  
+
+```{r}
+prop.test(table(crime$chas, crime$target))
+
+```
+<br>  
+  
+#### Response Variable: nox  
+  
+The variable `nox` represents the concentration of nitrogen oxide in each Boston area.  This variable exhibits a moderate, positive skew, with a kurtosis value similar to that of a normally distributed variable.  The final boxplot below indicates higher median `nox` values in high crime areas vis-a-vis the low crime counterparts. We also see moderately higher `nox` variance in high crime areas.  
+
+Here is a summary of observed values, rounded to the nearest 0.1 parts per 10 million:  
+
+```{r}
+addmargins(table(round(crime$nox,1)))
+```  
+  
+Below are summary statistics:    
+```{r}
+options(digits=2)
+with(crime, c(summary(nox), SD=sd(nox), Skew=skewness(nox), Kurt=kurtosis(nox)))
+```  
+  
+Now, let's look at the plots:  
+```{r}
+h <- ggplot(crime, aes(nox)) + geom_histogram(fill = 'seagreen4', binwidth = 0.05, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of nox') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=nox)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of nox") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", nox)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of nox', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), nox)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of nox by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+
+``` 
+  
+<br>  
+
+#### Response Variable: rm  
+  
+The predictor `rm` is count measure describing the average number of rooms per dwelling.  The distribution is roughly bell-shaped but with somewhat heavier tails than a normally distributed variable.  Lower crime areas, on average, are associated with a higher number of rooms per dwelling; however, the room counts by crime type are fairly close in value.  The room count variances by crime count also do not appear to be drastically different.  
+  
+Here is a distribution of room counts, rounded to the nearest whole number:  
+```{r}
+addmargins(table(round(crime$rm,0)))
+```  
+  
+Summary statistics are below:    
+```{r}
+options(digits=2)
+with(crime, c(summary(rm), SD=sd(rm), Skew=skewness(rm), Kurt=kurtosis(rm)))
+```  
+  
+Finally, here are the plots:  
+```{r}
+h <- ggplot(crime, aes(rm)) + geom_histogram(fill = 'seagreen4', binwidth = 0.5, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of rm') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=rm)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of rm") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", rm)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of rm', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), rm)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of rm by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+
+```
+  
+<br>  
+  
+#### Response Variable: age  
+  
+The variable `age` indicates the proportion of owner occupied units built prior to 1940.  This predictor has a significant left skew.  This result is not surprising, given the many historical districts within the greater Boston area.  In the boxplots below, we see a significantly higher mean percentage of older homes in high crime areas.  This result is expected, given that older neighborhoods tend to be located in dense urban areas.  
+  
+Here is a table of `age` values rounded to the nearest 5th percentage.      
+```{r}
+addmargins(table(5*round(crime$age/5,0)))
+```  
+  
+Let's review the summary statistics:  
+```{r}
+options(digits=2)
+with(crime, c(summary(age), SD=sd(age), Skew=skewness(age), Kurt=kurtosis(age)))
+```  
+  
+Now, let's look at the plots:  
+```{r}
+h <- ggplot(crime, aes(age)) + geom_histogram(fill = 'seagreen4', binwidth = 5, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of age') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=age)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of age") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", age)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of age', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), age)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of age by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```   
+  
+<br>  
+  
+#### Response Variable: dist  
+
+The predictor `dist` describes the average distance to Boston employment centers.  The variable is moderately right skewed.  Based on the boxplots below, we see see that low crime areas are associated with higher average distances to employment centers.  This result is consistent with our intuition, as major employment centers tend to be in dense, urban areas.  
+  
+Here is a table of distance values, rounded to the nearest unit:  
+
+```{r}
+addmargins(table(round(crime$dis,0)))
+```  
+
+Summary statistics are as follows:  
+```{r}
+options(digits=2)
+with(crime, c(summary(dis), SD=sd(dis), Skew=skewness(dis), Kurt=kurtosis(dis)))
+```  
+  
+Plots are below:  
+```{r}
+h <- ggplot(crime, aes(dis)) + geom_histogram(fill = 'seagreen4', binwidth = 1, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of dis') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=dis)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of dis") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", dis)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of dis', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), dis)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of dis by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```  
+  
+#### Response Variable: rad  
+  
+The `rad` variable is an integer-valued index measure indicating an area's accessibility to radial highways.  As stated earlier, we assume this variable contains ordinal, categorical data.  In the boxplots below, there appears to be a significant positive association between high crime rates and `rad` value.  In fact, the high crime rate areas appear to be heavily concentrated in areas with `rad` values of 24.       
+
+The distribution of this variable is tri-modal, with values clustering around index values of 4, 5, and 24.       
+  
+Here is a numerical distribution of the index values:  
+
+```{r}
+addmargins(table(round(crime$rad,0)))
+```  
+  
+Below are summary statistics:  
+
+```{r}  
+options(digits=2)
+with(crime, c(summary(rad), SD=sd(rad), Skew=skewness(rad), Kurt=kurtosis(rad)))
+```  
+  
+Finally, here are the plots:  
+```{r}
+h <- ggplot(crime, aes(rad)) + geom_histogram(fill = 'seagreen4', binwidth = 1, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of rad') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=rad)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of rad") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", rad)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of rad', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), rad)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of rad by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```  
+  
+#### Response Variable: tax  
+  
+The `tax` variable refers to the the tax rate per $10k of property value.  This variable is densely distributed around two of the following approximate values:  300 and 700--the latter value is close to the mode of the distribution.  High crime areas also appear to have a strong, positive association with the `tax` value--see the boxplots below.
+
+Here is distribution of `tax` values, rounded the nearest $25:  
+
+```{r}
+addmargins(table(25*round(crime$tax/25,0)))
+```  
+  
+Now, here are the summary statistics:  
+
+```{r}  
+options(digits=2)
+with(crime, c(summary(tax), SD=sd(tax), Skew=skewness(tax), Kurt=kurtosis(tax)))
+```  
+  
+Plots are below:  
+```{r}
+h <- ggplot(crime, aes(tax)) + geom_histogram(fill = 'seagreen4', binwidth = 25, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of tax') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=tax)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of tax") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", tax)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of tax', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), tax)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of tax by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```  
+  
+#### Response Variable: ptratio  
+  
+The predictor `ptratio` indicates the average school, pupil-to-student ratio, and has a right skewed distribution.  The mode of the distribution is roughly 20, which is relatively close to the maximum value of 22.  The boxplots below indicate a positive relationship between `ptratio` and high crime.   
+  
+Here is a distribution of `ptratio` values, rounded to the nearest whole number:    
+```{r}
+addmargins(table(round(crime$ptratio,0)))
+```  
+  
+Below are the summary statistics:  
+
+```{r}  
+options(digits=2)
+with(crime, c(summary(ptratio), SD=sd(ptratio), Skew=skewness(ptratio), Kurt=kurtosis(ptratio)))
+```  
+  
+Plots are below:  
+```{r}
+h <- ggplot(crime, aes(ptratio)) + geom_histogram(fill = 'seagreen4', binwidth = 1, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of ptratio') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=ptratio)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of ptratio") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", ptratio)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of ptratio', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), ptratio)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of ptratio by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```  
+  
+#### Response Variable: lstat  
+  
+The variable `lstat` indicates the proportion of the population deemed to be of lower status.  The variable is right skewed, and high crime areas tend to have be associated with larger `lstat` values.
+  
+Here is a summary table of `lstat` values rounded to the nearest 2:  
+
+```{r}
+addmargins(table(2*round(crime$lstat/2,0)))
+```  
+  
+Summary statistics are provided below:  
+
+```{r}  
+options(digits=2)
+with(crime, c(summary(lstat), SD=sd(lstat), Skew=skewness(lstat), Kurt=kurtosis(lstat)))
+```  
+  
+Let's look at the plots:  
+
+```{r}
+h <- ggplot(crime, aes(lstat)) + geom_histogram(fill = 'seagreen4', binwidth = 2 , color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of lstat') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=lstat)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of lstat") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", lstat)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of lstat', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), lstat)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of lstat by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```   
+  
+#### Response Variable: medv  
+  
+The last feature variable in our data set is `medv`, which represents the median value of residential homes in a given area, in $1,000s.  The variable is right skewed, and high values of `medv` appear to be associated with lower crime rates.   Variances of `medv` by crime type (e.g. high or low) are similar. 
+  
+Let's look at `medv` values, rounded to the nearest $3k:  
+  
+```{r}
+addmargins(table(3*round(crime$medv/3,0)))
+```  
+  
+Now, let's examine the summary statistics:  
+
+```{r}  
+options(digits=2)
+with(crime, c(summary(medv), SD=sd(medv), Skew=skewness(medv), Kurt=kurtosis(medv)))
+```  
+  
+Finally, here are the plots:  
+```{r}
+h <- ggplot(crime, aes(medv)) + geom_histogram(fill = 'seagreen4', binwidth = 3, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of medv') + theme(plot.title = element_text(hjust = 0.5)) 
+
+q <- ggplot(crime, aes(sample=medv)) + stat_qq_point(color='seagreen4') + stat_qq_line(color='grey69') +
+  labs(x="Thoretical Quantiles", y="Sample Quantiles", title = "QQ Plot of medv") + theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+b1 <- ggplot(crime, aes(x="", medv)) + geom_boxplot(fill='seagreen4', color='grey69')+ theme_classic() +
+  labs(title = 'Boxplot of medv', x="") + theme(plot.title = element_text(hjust = 0.5)) + coord_flip()
+
+b2 <- ggplot(crime, aes(x=factor(target), medv)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of medv by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h, q, b1, b2, ncol=2)
+```  
+<br>  
+  
+#### Target Variable: target  
+  
+Our binary response variable, `target`, indicates whether a particular area has a crime rate above the median Boston crime rate.  As such, we expect roughly half of the observations to have a value of 0, and the other half to have a value of 1.  Let's check:  
+  
+```{r}
+addmargins(table(crime$target))
+
+```
+  
+The split is very close to 50/50.  
+  
+<br>  
+  
+#### Bivariate Relationships  
+  
+Let's look at scatter plot/correlation matrix to get a better feel for the relationships between pairs of variables.  In the figure below, we plotted the high crime areas in blue and the low crime areas in green.  We also included a loess curve in the scatter plots to get a better feel for the relationship between variables.    
+  
+```{r fig.retina=1, fig.width=15, fig.height=15}
+mycols = c('green3','blue')
+crime$target_mod <- factor(ifelse(crime$target ==1 , 'y', 'n'))
+#as.character(crime$target)
+#crime[,1:13]
+#library(BioStatR)
+
+panel.cor <- function(x,y, digits = 2, cex.cor, ...) {
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r <- cor(x,y)
+  txt <- format(c(r, 0.123456789), digits = digits)[1]
+  text(0.5,0.5, txt, cex =sqrt(abs(r*6)))
+  
+}
+
+pairs(crime[,1:13],  col= mycols[crime$target_mod], gap=0.3, lower.panel = panel.smooth, upper.panel = panel.cor, cex.labels = 3)
+
+```
+  
+  
+**Multicollinearity Concerns**  
+  
+There appear to be many moderate pairwise correlations between the predictor variables in our data set.  However, only variables with high correlations should be problematic for model interpretation. Let's review pairwise correlations with absolute values of 0.75 or higher:  
+  
+* `indus` and `nox`: correlation value of 0.76.  This result makes sense, as we expect areas with dense industry concentration to have higher environmental pollutants such as $\mathrm{NO_2}$  
+* `dist` and `nox`: correlation value of -0.77.  This result is consistent with our intuition: we expect areas close to employment centers to have higher concentrations of environmental pollutants, and areas farther away to have lower concentrations.  
+* `rad` and `tax`: correlation value of 0.91.  Access to radial highways and tax rates appear are strongly correlated values.  We are particularly concerned about the multicollinearity effects of these two variables.     
+  
+To assess the impact of multicollinearity, we can fit an OLS model to our full data set and compute the variance inflation factors (VIFs).  Below is the VIF output from fitting this regression model:  
+
+```{r}
+options(digits=3)
+mylm <- lm(target ~ . ,data=crime[1:13])
+vif(mylm)
+```  
+The highest VIF values are associated with the `rad` and `tax` variables.  We can bring all VIFs to an acceptable level by removing one of these two variables.  For instance, if we remove `tax`, our VIF factors are:  
+ 
+```{r}
+options(digits=3)
+mylm <- lm(target ~ . - tax ,data=crime[1:13])
+vif(mylm)
+```  
+  
+**Unusual Predictor/Target Relationships**  
+  
+We noted a few complex loess curve shapes relating our predictor variables to the target variable.  These relationships may reflect actual, highly nonlinear relationships with the target variable, or could be the result of interactions with other predictors.  Alternatively, the loess fits could be the result of fitting to relatively sparse data points:  
+  
+* `rm`: Our loess curve initially indicates a negative relationship between the number of rooms and the crime rate category.  However, when the number of rooms exceeds approximately 7, the relationship becomes positive.  This strange loess curve shape is most likely the result of the model fitting to sparse data, as there are only about 30 observations with an average room count in excess of 7.  In general, we expect higher room counts to be associated with lower crime rates.  
+
+* `ptratio`: we would expect crime rates to be higher in areas with high pupil-teacher ratios.  However, the loess curve initially indicates an increasing propensity for high crime rates with increases to the this `ptratio`.  Because this variable is left skewed with a high density of ratios clustered around 20, we believe this unusual curve shape is due to the loess model fitting to sparse data at low ratio values.  
+* `medv`:  We expect high median home values to be associated with higher median values.  This pattern appears to hold in our loess curve for median values below approximately \$30k.  The pattern then reverses for values above \$30k.  Once again, we believe this pattern reversal is due to sparse data.  The variable `medv` is right skewed, with relatively few data observations where the median value exceeds $30k$  
+  
+## Data Preparation  
+  
+In this section, we describe data modifications and transformations applied before fitting our regression models.  
+<br>  
+  
+#### Missing Values  
+  
+As mentioned previously, our data set contains no missing elements; so we do not need to use any imputation procedures.  
+<br>  
+ 
+#### Outliers and Unusual Observations  
+  
+At this stage, we see no clear data entry errors in our data set.  
+<br>  
+  
+#### Variable Transformations  
+  
+In binary logistic regression, it is desirable to have predictor variables that are normally distributed, whenever possible.  When the predictor is normally distributed with similar variances across both target variable values, then the log odds are a linear function of the predictor.  And when the predictor is normally distributed with different variances for the separate target response values, then the log odds are a quadratic function of the predictor.  
+  
+Let's review each predictor variable and discuss potential transformation procedures.  
+  
+**zn**  
+  
+The `zn` predictor is highly right skewed.  This variable also has many zero values--over 70% of observations. Let's compare the percentage of high crime areas for zero-valued `zn` vs. values 1 or higher:  
+
+```{r}
+options(digits=3)
+cbind(zn_zero=mean(crime$target[crime$zn==0]), zn_1_plus=mean(crime$target[crime$zn != 0]))
+
+```
+```{r}
+crime$zn_zero <- ifelse(crime$zn == 0,1,0)
+prop.test(table(crime$zn_zero,crime$target))
+
+```
+The difference in these proportions is statistically significant.  Given that the vast majority of high crime areas also have a zero `zn` value, we will proceed to create a new, categorical variable, `zn_zero.`  A value of 1 indicates that no land is zoned for large residential lots.  A value of 0 indicates that at least some land is zoned for large residential lots.  
+  
+Finally, let's look at a jittered scatter plot of nonzero `zn` by target value:
+
+```{r}
+ggplot(crime[crime$zn != 0,], aes(x=zn, target)) + geom_jitter(color='seagreen4', width=0,
+                                                               height=0.05) +
+  labs(title = 'Scatter of zn (greater than 0) by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+```
+  
+There are very few nonzero observations of `zn` with high crime values, and there does not appear to be a straightforward relationship between the target value and nonzero `zn` proportion; so we will not perform additional transformations with this variable.  
+  
+**indus**  
+  
+We noted previously that the distribution of`indus` has a bi-modal appearance, with values clustered around two ranges.  Basic power transformations will not result in an approximately normal or symmetric distribution.  Also, we previously saw that high crime areas are primarily concentrated in areas with high industry concentration.  Therefore, we recommend making a new categorical variable, `indus_high`, with a value of 1 if the industry proportion is close to the higher valued mode, and value of 0 if the industry value is close to the lower mode.  We've assigned a 0 value to `indus_high` for all `indus` values of 14 and lower, and 1 otherwise.  The cutoff choice reflects an approximate halfway point between the two mode centers.  
+
+```{r}
+crime$indus_high <- ifelse(crime$indus <= 14, 0, 1)
+```
+  
+Let's do a sanity check of our proposed bifurcation by comparing the high crime rates for each value of the new `indust_high`  variable:  
+
+```{r}
+options(digits=3)
+cbind(val_0=mean(crime$target[crime$indus_high==0]),val_1=mean(crime$target[crime$indus_high==1]))
+
+```
+
+The percentage of high crime areas are very different for each value of `indus_high`.  
+
+**chas**  
+  
+The predictor `chase` is a binary, categorical variable.  We will leave the variable as-is.  
+  
+**nox**  
+  
+The variable `nox` is moderately right skewed.  We perform the box-cox procedure to determine an appropriate transformation:  
+  
+```{r}
+boxcoxfit(crime$nox)
+```  
+  
+Based on the box-cox procedure output, We will create a new variable `nox_mod`, that is the reciprocal of the raw `nox` value.  We then multiply the reciprocal by -1 to preserve the direction of the original relationship.  
+
+```{r}
+crime$nox_mod <- -1 / crime$nox
+```  
+  
+The transformed variable is more symmetrical, with a skewness value closer to zero:  
+  
+```{r}
+skewness(crime$nox_mod)
+```
+  
+The variances for each target value are also similar--see below:  
+
+
+```{r}
+
+h <-  ggplot(crime, aes(nox_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 0.15, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of nox_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+b <- ggplot(crime, aes(x=factor(target), nox_mod)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of nox_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol= 2)
+
+```
+  
+**rm**  
+  
+The variable `rm` has a mild positive skew and high kurtosis value.  Let's look at the suggested box cox transformation:
+
+```{r}
+boxcoxfit(crime$rm)
+```
+  
+Based on this output, we will transform the variable by taking the quarter root of the raw value.  
+```{r}
+crime$rm_mod <- crime$rm ^ 0.25
+
+```
+  
+The transformed variable is more symmetric, with a skewness value of:  
+```{r}
+options(digits=3)
+skewness(crime$rm_mod)
+```  
+  
+The variances of `rm_mod` for each target value appear to be fairly similar:  
+
+```{r}
+
+h <-  ggplot(crime, aes(rm_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 0.02, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of rm_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+
+b <- ggplot(crime, aes(x=factor(target), rm_mod)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of rm_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol=2)
+
+```  
+  
+**age**  
+  
+Age has a moderate left skew.  Let's review the suggested box-cox transformation:  
+  
+```{r}
+boxcoxfit(crime$age)
+
+```
+  
+We apply the suggested power transformation of 1.3 and store in a new variable, `age_mod`.  
+  
+
+```{r}
+
+crime$age_mod <- crime$age^1.3
+
+h <- ggplot(crime, aes(age_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 50, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of age_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+b <- ggplot(crime, aes(x=factor(target), age_mod)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of rm_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol=2)
+
+```
+  
+The transformed variable's skew has improved slightly, but there is still significant negative skew.  The variances are also significantly different across the two values of the target variable.  
+  
+**dis**  
+  
+The predictor `dis` has a moderate positive skew.  Let's transform using the box-cox transformation:  
+```{r}
+boxcoxfit(crime$dis)
+
+```
+
+Given that the value of the lambda parameter is fairly close to 0, we will use the log transformation and save to results to a new variable, `dis_mod`.  
+  
+```{r}
+crime$dis_mod <- log(crime$dis)
+```
+  
+The transformed distribution has improved skew:  
+  
+```{r}
+skewness(crime$dis_mod)
+
+```
+```{r}
+
+h <-  ggplot(crime, aes(dis_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 0.2, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of dis_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+b <- ggplot(crime, aes(x=factor(target), dis_mod)) + geom_boxplot(fill='seagreen4', color='grey69') +
+  labs(x='target', title = 'Boxplot of dis_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol=2)
+
+```  
+  
+The transformed variable has similar variances across each target value.   
+
+  
+**rad**  
+  
+The predictor `rad` has a multi-modal appearance, with values densely clustered around 4-5 and 24.  Given this dense clustering--and the limited effectiveness of power transformations to generate an approximate normal distribution--we will  create a categorical variable, `rad_high`, that assigns a value of 1 when the rad index level is 15 or higher, and 0 otherwise.  The choice of 15 as a cutoff reflects an approximate halfway point between the the two cluster centers.  Note:  In our training data there are no `rad` measures between 9 and 23.  
+  
+```{r}
+crime$rad_high <- ifelse(crime$rad >= 15, 1, 0)
+```
+  
+As a sanity check to make sure this transformation is reasonable, let's look at the percentage of high crime areas for each value of the new `rad_high` variable:  
+  
+```{r}
+options(digits=3)
+cbind(val_0=mean(crime$target[crime$rad_high==0]),val_1=mean(crime$target[crime$rad_high==1]))
+
+```
+  
+In our training data, all of the `rad_high` values of 1 were located in high crime areas, while only 31% of the 0 values were in low crime areas.  
+
+**tax**  
+  
+The variable `tax` also has a bi-modal shape, with values densely clustered around 300 and 700--with no values recording in the training data between between 470 and 665.  Because power transformations have limited effectiveness in approximating a normal distribution, we'll create a new categorical variable, `tax_high`, that assigns a value of 1 when the tax value is greater than or equal to 500, and 0 otherwise.  The 500 cutoff reflects an approximate halfway point between the two modal centers.  
+  
+```{r}
+crime$tax_high <- ifelse(crime$tax >= 500, 1,0)
+```
+  
+Let's perform another sanity check to determine if there is significant relationship with our target variable:  
+```{r}
+options(digits=3)
+cbind(val_0=mean(crime$target[crime$tax_high==0]),val_1=mean(crime$target[crime$tax_high==1]))  
+  
+```
+We see that 96% percent of the `tax_high` variables with value one are in high crime areas, and only 32% of the zero values are in high crime areas; so our bifurcation makes sense.  
+
+  
+**ptratio**  
+  
+The predictor variable `ptratio` has a moderate negative skew.  Let's perform box-cox transformations:
+  
+```{r}
+boxcoxfit(crime$ptratio)
+```
+  
+The suggested power transformation of 4 does not correct the the left skew, and its implementation also creates unusually large, transformed ptratio values(e.g. 200,000 and higher).  Therefore, We will forgo the power transformation for the sake of simplicity.  We noted earlier that there appears to be a relationship between high `ptratio` values and high crime rates.  However,this relationship does not appear to be particularly strong.  
+  
+**lstat**  
+  
+The `lstat` variable has a moderate positive skew.  
+
+Let's look the suggested power transformation from the box-cox procedure:  
+  
+```{r}
+boxcoxfit(crime$lstat)
+```
+  
+Based on this output, we create a new variable `lstat_mod`, that applies a quarter root transformation to the original variable.  
+  
+```{r}
+crime$lstat_mod <- crime$lstat^0.25 
+```
+  
+The transformed variable is fairly symmetric, with a skewness value of:  
+  
+```{r}
+options(digits=3)
+skewness(crime$lstat_mod)
+
+```
+  
+The variances of the transformed variable are also similar across each target variable value.
+
+```{r}   
+h <-  ggplot(crime, aes(lstat_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 0.2, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of lstat_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+b <- ggplot(crime, aes(x=factor(target), lstat_mod)) + geom_boxplot(fill='seagreen4', color='grey69') + labs(x='target', title = 'Boxplot of lstat_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol=2)
+ 
+```  
+  
+**medv**  
+  
+The predictor `medv` has a moderate, positive skew.  Let's look a the suggested box-cox transformation:  
+  
+```{r}
+boxcoxfit(crime$medv)
+```  
+Based on this output, we will apply a quarter root transformation and assign to a new variable, `medv_mod`.  
+  
+```{r}
+crime$medv_mod <- crime$medv^0.25
+
+```
+  
+The newly transformed variable is virtually symmetric, with a skewness value of:  
+
+```{r}
+options(digits=3)
+skewness(crime$medv_mod)
+
+```
+  
+```{r}   
+h <-  ggplot(crime, aes(medv_mod)) + geom_histogram(fill = 'seagreen4', binwidth = 0.2, color = 'grey69' ) + 
+ theme_classic() + labs(title = 'Histogram of medv_mod') + theme(plot.title = element_text(hjust = 0.5)) 
+
+b <- ggplot(crime, aes(x=factor(target), medv_mod)) + geom_boxplot(fill='seagreen4', color='grey69') + labs(x='target', title = 'Boxplot of medv_mod by target') + theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+grid.arrange(h,b, ncol=2)
+ 
+```    
+  
+While the new variable appears to be fairly symmetric for both values of the target value, the variance associated with a target value of 1 appears to be greater than the 0 value counterpart.  
+  
+#### Multicollinearity Check  
+  
+Now that we've made transformations to most our variables, we should check for significant pairwise correlations between our predictors.  
+  
+```{r fig.retina=1, fig.width=15, fig.height=15}
+mycols = c('green3','blue')
+
+pairs(crime[,c(15:16, 3, 17:22,10, 23:24, 13)],  col= mycols[crime$target_mod], gap=0.3, lower.panel = panel.smooth, upper.panel = panel.cor, cex.labels = 2)
+
+```  
+  
+There are four pairs with correlation values with magnitude over 80%:  
+  
+* `nox_mod` and `age_mod`: 0.80  
+* `nox_mod` and `dist_mod`: -0.88  
+* `rad_high` and `tax_high`: 0.97
+* `lstat_mod` and `medv_mod`: -0.83  
+  
+Let's review VIFs:  
+```{r}
+options(digits=3)
+mylm <- lm(target ~ . ,data=crime[,c(15:22,10,13, 23:24, 3)])
+vif(mylm)
+```
+  
+The VIF values for `rad_high` and `tax_high` are both around 20; so we must remove at least one of these predictors from any models.  Also, the correlation between `nox_mod` and `dis_mod` is driving up the VIFs for both predictors above 5.  We should at least consider removing one of these two predictors. Removing `nox_mod` will reduce the `dis_mod` VIF below 5.  Removing `dis_mod` will reduce the VIF of `nox_mod` to value around 5.  Finally, the correlation between `lstat_mod` and `medv_mod` is driving the value of `lstat_mod` slightly above 5.  Removing one of these two predictors will ensure that both variables have VIFs below 5.  We should at least consider this last option.  
+  
+Below are VIFs if we remove `tax_high`, `nox_high`, and `lstat_mod` from our model:  
+```{r}
+mylm <- lm(target ~ . -tax_high - nox_mod - lstat_mod  ,data=crime[,c(15:22,10, 23:24, 13)])
+vif(mylm)
+
+```
+  
+
+  
+## Build Model  
+  
+#### Variable Overview  
+  
+Let's take stock of variables that we will consider for our models:  
+  
+* `zn_zero`: a transformed, binary variable  
+* `indus_high`: a transformed, binary variable  
+* `chas`: a binary variable
+* `nox_mod`: a transformed, continuous variable
+* `rm_mod`: a transformed, continuous variable
+* `dis_mod`: a transformed, continuous variable  
+* `rad_high`: a transformed, binary variable.  We should be not include this variable and `tax_high` together, given the high correlation between these variables.  
+* `tax_high`: a transformed, binary variable.  We should not include this variable in the same model as the `rad_high` variable.  
+* `lstat_mod`: a transformed, continuous variable
+* `medv_mod`: a transformed, continuous variable.  We will consider adding a quadratic term because the variances appear to be different for each target variable value.    
+* `age`:  this variable (whether transformed or not) is asymmetric and has different variances for each target value.         
+* `ptratio`:  this predictor and its transformed counterpart have moderate skew and different variances for each value of the target predictor. 
+  
+#### Model 1: Manual Selection  
+  
+With our first model, we will only include binary variables and continuous variables that are approximately normally distributed.  Our goal is to  have a relatively simple model with interpretable coefficients.  We also desire to minimize multicollinearity issues--this also helps with model interpretability.  
+  
+We drop `tax_high` and `dis_mod` from our model to reduce multicollinearity issues.  We also drop `age_mod` and `ptratio`due to our inability effectively apply power transformations to these variables.  
+  
+Let's review the VIFs for the included predictors:  
+
+```{r}
+options(digits=3)
+mylm <- lm(target ~ . - age_mod - rad_high - ptratio - dis_mod ,data=crime[,c(15:22,10, 23:24, 13,3)])
+vif(mylm)
+
+```
+All VIF values are below 5.  
+  
+Let's review our model output:  
+  
+
+```{r}
+mylogit1 <- glm(target~zn_zero + indus_high + chas + nox_mod + 
+                  rm_mod + tax_high + lstat_mod + 
+                  medv_mod ,family="binomial",data=crime)
+summary(mylogit1)
+
+```
+  
+Based on the Wald tests of significance, only two of our predictors, `nox_mod` and `tax_high`, are statistically significant.  
+  
+In addition to most of our predictors not being significant, a few of the signs of the coefficients don't make sense:  
+  
+* `indus_high`: we expect the odds of being a high crime area to increase in areas with heavy industry, not decrease.  
+* `rm_mod`: we generally would expect crime to be lower in areas with large homes/many rooms, not higher.  
+* `medv_mod`: we expect the odds of a crime to decrease with increases to home value.  
+
+We'll now produce marginal model plots.  The goal here is to visually assess if our predictors are modeled correctly.  If our parametric models fit closely to the nonparametric models depicted in the plots, then we conclude that our model has been reasonably specified.  Note: only the continuous predictors can be assessed via marginal plots:  
+
+```{r}
+mmps(mylogit1, terms = ~ . - zn_zero - indus_high - chas -tax_high, layout=c(3,2), key=FALSE)
+
+```  
+  
+There is reasonable agreement between the nonparametric and parametric in each plot, with the exception of `rm_mod` and `lstat_mad`.  
+  
+Let's visually examine whether or not there is significant interaction between these two variables:  
+```{r}
+par(mfrow=c(1,1))
+plot(crime$rm_mod,crime$lstat_mod,pch=crime$target+1,col=crime$target+1,
+     xlab='rm_mod',ylab='lstat_mod', main="Test Interaction of lstat_mod and rm_mod")
+abline(lsfit(crime$rm_mod[crime$target==0],crime$lstat_mod[crime$target==0]),lty=1,col=1)
+abline(lsfit(crime$rm_mod[crime$target==1],crime$lstat_mod[crime$target==1]),lty=2,col=2)
+legend(1.65, 2.2,legend=c("No","Yes"),pch=1:2,col=1:2,title="High Crime?")
+```  
+These variables appear to have significantly different slopes; so we will revise our model to include an interaction term.  
+  
+Here is output from our revised model:  
+
+```{r}
+mylogit1 <- glm(target~zn_zero + indus_high + chas + nox_mod + 
+                  rm_mod + tax_high + lstat_mod + 
+                  medv_mod + rm_mod:lstat_mod ,family="binomial",data=crime)
+summary(mylogit1)
+
+```
+  
+With the addition of the interaction term, we now see statistically significant p-values for `rm_mod`, `lstat_stat_mod`, and the interaction term.  
+  
+The signs for the coefficients now make sense except for `medv_mod`, which is slightly positive but we would expect this coefficient to be negative.  
+  
+Now, let's re-produce the marginal plots from earlier for our revised model:  
+  
+```{r}
+mmps(mylogit1, terms = ~ . - zn_zero - indus_high - chas -tax_high, layout=c(3,2), key=FALSE)
+
+```
+  
+All plots now show reasonable alignment with the nonparametric curves.  
+  
+#### Model 2: Simplification of Model 1:  
+  
+Our first model included a variety of predictors that produced statistically insignificant z scores. Let's pair down the first model by removing all predictors with p-values in excess of 5%.  
+  
+```{r}
+mylogit2 <- glm(target~ nox_mod + rm_mod + lstat_mod + tax_high + 
+                  rm_mod:lstat_mod ,family="binomial",data=crime)
+
+summary(mylogit2)
+
+```  
+  
+Model 2 has a few benefits compared to model 1:  
+  
+* The model is simple, with only 4 predictors plus one interaction term.  Model 2, on the other hand, has 8 unique predictors plus one interaction term  
+* All predictors are statistically significant in Model 2.
+* All coefficients have signs that are consistent with our intuition.  
+  
+Model 2 also has the added benefit that it's AIC Criterion is lower than that of Model 1.  In other words, Model 2 may provide a better fit to the data overall. 
+  
+#### Model 3: Automatic Selection Stepwise Model  
+  
+For our last model, we'll we'll fit a binary logistic regression using a stepwise regression procedure, with variable selection occurring in both forward and backward directions.  
+  
+For simplicity, we'll only include first order terms, but we'll open up the pool of candidate variables to all variables in our data set--using transformed versions of our variables, where applicable.  There is one exception though:  we exclude `rad_high` due to its extremely high correlation with `tax_high`.  
+
+```{r}
+model.upper <- glm(target~zn_zero + indus_high + chas + nox_mod + 
+                  rm_mod  + dis_mod + tax_high + lstat_mod + 
+                  medv_mod + ptratio+ age_mod  ,family="binomial",data=crime)
+
+model.null = glm(target ~ 1, 
+                 data=crime,
+                 family = "binomial")
+mylogit3 <- step(model.null, scope = list(upper=model.upper, lower = model.null),
+                 trace = 0, direction = 'both')
+
+summary(mylogit3)
+
+```
+  
+The stepwise procedure resulted in the selection of 7 predictor variables.  
+While we're pleased to see statistically z scores for all variables, we must be cognizant that automated selection procedures tend to produce biased coefficient estimates and p-values that are generally lower than their true values.  
+  
+We also note that the stepwise regression model as a lower AIC value than Model 2, which may indicate a better fit.  
+  
+## Model Selection  
+  
+#### Select Best Model  
+
+In the previous section, we noted that Model 2 was a subset of Model 1.  The differences in the residual deviances from a nested model and its full model counterpart is approximately chi squared distributed.  Let's compute the associated p-value for the difference in deviance for these two models:  
+  
+```{r}
+pchisq(mylogit2$deviance - mylogit1$deviance,mylogit2$df.residual - mylogit1$df.residual ,lower=FALSE)
+
+```
+The p-value does not indicate a statistically significant difference.  This is additional evidence that Model 2 is superior to Model 1:  
+
+Now let's compare all three model fits, using AIC, corrected AIC, BIC, and loglikehood values:
+
+```{r}
+m1 <- cbind(AIC=AIC(mylogit1), AICc=AICc(mylogit1), BIC = BIC(mylogit1), loglik=logLik(mylogit1))
+m2 <- cbind(AIC=AIC(mylogit2), AICc=AICc(mylogit2), BIC = BIC(mylogit2), loglik=logLik(mylogit2))
+m3 <- cbind(AIC=AIC(mylogit3), AICc=AICc(mylogit3), BIC = BIC(mylogit3), loglik=logLik(mylogit3))
+rbind(m1,m2,m3)
+```  
+  
+The first three terms, AIC, AICc, and BIC, provide a consistent interpretation of model fits:  
+
+* Model 1 has the highest AIC, AICc, and BIC values, which is indicative of poor relative fit.  
+* Model 2 has values for these measures that are lower than those of Model 1, but higher than the values of Model 3.  The interpretation is that Model 2 is superior to Model 2, but inferior to model 3.  
+* Model 3 has the lowest measures of AIC, AICc, and BIC, which is indicative of a superior fit to the other two models.  
+  
+Binary logistic regression models are fit via maximum likelihood estimation, and higher log likelihoods are associated with better model fits.  One of the drawbacks of standard log-likelihood values is that is does not penalize for model size (i.e. number of parameters).  Using log-likelihood measures alone to assess model fit could bias preference in favor of larger, over fitting models.  There are alternative log-likelihood measures that do penalize for model size, but for now we'll review the non-penalizing measure:  
+ 
+* Model 1 has a higher log-likelihood than Model 2.  The difference in values is likely explained by the additional parameters used vis-a-vis Model 1.  
+* Model 3 has the highest log-likelihood, despite having fewer parameters than Model 1.
+
+Moving forward, we choose Model 3 as the best of the models examined in this assignment.  The model strikes a middle ground in terms of size in relation to the other two models, and is superior in all goodness-of-fit measures examined.  
+  
+#### Best Model Metrics  
+  
+Here is a ROC curve of our selected model and area under the curve:  
+  
+```{r}
+crime$predict <- predict(mylogit3, crime, type='response')
+
+myroc <- roc(crime$target, crime$predict, plot=T, asp=NA,
+                legacy.axes=T, main = "ROC Curve", ret="tp", col="blue")
+
+myroc["auc"]
+
+```  
+  
+As a brief aside, let's compare Model 3's AUC to the AUCs for Model 1 and Model 2:  
+  
+```{r}
+# models 1 and 2 prediction probs
+m1_pred <- predict(mylogit1, crime, type="response")
+m2_pred <- predict(mylogit2, crime, type="response")
+
+#AUC
+paste("Model 1:",roc(crime$target, m1_pred)["auc"])
+paste("Model 2:",roc(crime$target, m2_pred)["auc"])
+
+```
+The AUC for Model 1 is identical to Model 3's AUC, while model 2's AUC is lower.  
+  
+We now need to choose an appropriate cutoff probability measure for predicting whether a neighborhood has a high or low crime rate.  One common measure used is called Youden's index, which attempts to maximize both sensitivity and specificity:  
+  
+Using the `coords()` function in the pRoc package, the optimal measure is:  
+```{r}
+coords(myroc, "best", ret='threshold', best.method="youden")
+```
+  
+From a practical standpoint, this value is very close to 0.50; so we will use a probability of 50% as our cutoff.  
+  
+We can now produce a confusion matrix, and various classification metrics:  
+
+```{r}
+crime$predict_target <- ifelse(crime$predict >= 0.5, 1, 0)  
+cm <- confusionMatrix(data=crime$predict_target, reference=crime$target, positive='1')
+
+cm$table
+
+a <- cm$overall["Accuracy"]; names(a) <- NULL # accuracy
+e <- 1 - a; names(e) <- NULL # error rate
+p <- cm$byClass["Precision"]; names(p) <- NULL  # precision
+st <- cm$byClass["Sensitivity"]; names(st) <- NULL  # sensitivity
+sp <- cm$byClass["Specificity"]; names(sp) <- NULL # specificity
+f1 <- cm$byClass["F1"] ; names(f1) <- NULL # F1
+
+# display metrics
+list(accuracy=a, error_rt = e, precision=p, sensitivity=st, specificity=sp, F1=f1)
+
+```
+  
+Our model has relatively high values of sensitivity and specificity.  We conclude that our model is fairly strong.  Our last step is to judge our model against a test data set.
+  
+## Test Data Predictions  
+  
+The last step is to make crime level predictions using the supplied data set.  
+Please refer to the Github link in the Appendix for a link to the prediction file.  
+  
+```{r}
+url <- 'https://raw.githubusercontent.com/spitakiss/Data621/master/Homework3/crime-evaluation-data_modified.csv'
+
+test_crime <- read.csv(url)
+test_crime$zn_zero <- ifelse(test_crime$zn == 0,1,0)
+test_crime$indus_high <- ifelse(test_crime$indus <= 14, 0, 1)
+test_crime$nox_mod <- -1 / test_crime$nox
+test_crime$rm_mod <- test_crime$rm ^ 0.25
+test_crime$age_mod <- test_crime$age^1.3
+test_crime$dis_mod <- log(test_crime$dis)
+test_crime$rad_high <- ifelse(test_crime$rad >= 15, 1, 0)
+test_crime$tax_high <- ifelse(test_crime$tax >= 500, 1,0)
+test_crime$lstat_mod <- test_crime$lstat^0.25 
+test_crime$medv_mod <- test_crime$medv^0.25
+test_crime$predict_prob <- predict(mylogit3, test_crime, type='response')
+test_crime$predict_target <- ifelse(test_crime$predict_prob >= 0.50, 1,0)
+
+write.csv(test_crime,"my_test_predictions.csv", row.names=FALSE)
+
+```
+
+
+## Appendix  
+  
+- Here is a link to the full, R Markdown Code[https://github.com/spitakiss/Data621/blob/master/Homework3/Grzasko_HW3.Rmd]
+
+- Here is a link to the prediction file [https://github.com/spitakiss/Data621/blob/master/Homework3/my_test_predictions.csv]
+  
+
+
+
+ 
+  
+
+  
+
+
+
+  
+
+  
+
+  
+
+
+
+  
+
+
+
+  
+
+
+  
+
+
+
+
