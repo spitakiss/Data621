@@ -1,0 +1,2780 @@
+---
+title: 'Data 621: Homework 4'
+author: "Aaron Grzasko"
+date: "April 14, 2018"
+output:
+  pdf_document: default
+  html_document:
+    highlight: haddock
+    theme: cosmo
+subtitle: Car Insurance Data
+---  
+
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, cache=TRUE, comment=NA,
+                      fig.align='center',options(width = 75, scipen=999))
+```  
+
+## Introduction  
+
+In this report, we analyze insurance data to estimate the following quantities:  
+  
+* The probability that a specified driver will have a car crash.  
+* The dollar cost of auto claims, given that the insured was involved in a crash.    
+
+In practice, these claim frequency and severity measures are useful for determining appropriate pure premium amounts to charge auto policyholders.  
+
+
+Using the provide training data set, we will build two separate models:  
+  
+* a binary logistic regression to determine crash probabilities.  
+* a multiple linear regression model to estimate claim severity.  
+
+We will then make predictions on the provided insurance testing data set. 
+
+
+## Data Exploration  
+  
+#### Variable Overview  
+  
+```{r}
+# load libraries
+library(stringr)
+library(knitr)
+library(moments)
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(scales)
+library(dplyr)
+library(mice)
+library(geoR)
+library(car)
+library(bestglm)
+library(sme)
+library(pROC)
+library(caret)
+
+
+url <- "https://raw.githubusercontent.com/spitakiss/Data621/master/Homework4/insurance_training_data.csv"
+
+auto <- read.csv(url)  
+
+```
+
+The training data set includes `r format(nrow(auto),big.mark=",")` observations, with `r ncol(auto)` variables:  `r ncol(auto)-3` predictors, two response variables, and one record identifier.  
+
+Below is a brief description of the included variables:  
+  
+```{r}
+# create table describing variables in dataset
+vname <- names(auto)
+
+vdefn <- c("Identification Variable (do not use) ",
+           "In a crash? 1=YES 0=NO ",
+           "Cost of Crash, if applicable",
+           "# Driving Children",
+           "Age of Driver", 
+           "# Children at Home",
+           "Years on Job",
+           "Income",
+           "Single Parent",
+           "Home Value",
+           "Marital Status",
+           "Gender",
+           "Max Education Level",
+           "Job Category",
+           "Commute Distance",
+           "Vehicle Use",
+           "Value of Vehicle",
+           "Time in Force",
+           "Type of Car",
+           "A Red Car",
+           "# Claims (Past 5 Years) ",
+           "Total Claims (Past 5 Years)",
+           "License Revoked (Past 7 Years)",
+           "Motor Vehicle Report Points",
+           "Vehicle Age",
+           "Home/Work Area"
+)
+           
+
+veffect <- c("None",
+             "None",
+             "None",
+             "When teenagers drive your car, increased crash risk",
+             "Young and old drivers might be riskier",
+             "Unknown effect",
+             "Long-term employees are usually safer",
+             "In theory, rich have fewer crashes",
+             "Unknown impact",
+             "In theory, home owners may drive more responsibly",
+             "In theory, married individuals are less risky",
+             "Urban legend: females are safer drivers",
+             "Unknown, but in theory educated people drive more safely",
+             "In theory, white collar workers are less risky",
+             "Long drives to work usually suggest greater risk",
+             "Commercial fleet driven more, may impact collision prob",
+             "Unknown impact on collision prob, but impacts crash payout",
+             "Long-term customers are usually safer",
+             "Unknown impact on collision prob, but impacts crash payout",
+             "Urban legend: red cars are riskier, particularly sports cars",
+             "If  total payout  high, future payouts might be high",
+             "Claim count should be positively correlated with future claims",
+             "If your license was revoked, you probably are a riskier driver",
+             "Traffic ticket counts have postive correlation with crashes",
+             "Unknown impact on collision prob, but impacts crash payout",
+             "Unknown impact"
+             
+)
+
+var_df <- data.frame(vname,vdefn, veffect, row.names = NULL)
+kable(var_df, col.names=c('Variable Name','Description','Theoretical Impact'))
+
+```  
+  
+There are a couple issues with the raw data file:  
+  
+* Currency fields were treated as factors due to "$" and "," characters.    
+* Multiple character field entries included an extraneous "z_" or "<" prefix.  
+  
+We also rescaled the fields `INCOME`, `HOME_VAL`, `BLUEBOOK`, and `OLDCLAIM` to be so that dollars are expressed in $1,000s, 
+  
+```{r}
+# training data cleaning scripts
+
+currency_fix <- function(x) {
+  num <- str_replace_all(x, "\\$","")
+  num <- as.numeric(str_replace_all(num, "\\,",""))
+  num
+}
+
+auto$INCOME <- currency_fix(auto$INCOME)
+auto$HOME_VAL <- currency_fix(auto$HOME_VAL)
+auto$BLUEBOOK <- currency_fix(auto$BLUEBOOK)
+auto$OLDCLAIM <- currency_fix(auto$OLDCLAIM)
+
+
+auto[sapply(auto, is.factor)] <- lapply(auto[sapply(auto, is.factor)], 
+                                        function(x) str_replace(x,"z_|<",""))
+
+auto[sapply(auto, is.character)] <- lapply(auto[sapply(auto, is.character)],as.factor) 
+
+auto$EDUCATION <- ordered(auto$EDUCATION, levels = c("High School", "Bachelors", "Masters", "PhD") )
+
+auto$INCOME <- auto$INCOME / 1000  
+auto$HOME_VAL <- auto$HOME_VAL / 1000
+auto$BLUEBOOK <- auto$BLUEBOOK / 1000
+auto$OLDCLAIM <- auto$OLDCLAIM / 1000
+
+```
+  
+After cleaning up these minor issues, we're ready to explore data types and sample observations from the training set:  
+  
+```{r}
+str(auto)
+```
+  
+We ignore the field `INDEX` for modeling purposes, which is used only for identifying observations.  
+  
+The two response variables, `TARGET_FLAG`and `TARGET_AMT`, contain binary and dollar values, respectively.  
+  
+The predictors include four discrete count variables:  
+  
+* `KIDSDRIV`  
+* `HOMEKIDS`  
+* `CLM_FREQ`  
+* `MVR_PTS`  
+
+There are five discrete time measurements:  
+
+* `AGE`  
+* `YOJ`
+* `TRAVTIME`  
+* `TIF`  
+* `CAR_AGE`
+  
+There are also seven binary, categorical features:  
+  
+* `PARENT1` 
+* `MSTATUS`
+* `SEX`  
+* `CAR_USE`  
+* `RED_CAR`  
+* `REVOKED`  
+* `URBANCITY`  
+
+The data set includes two multinomial, categorical features:  
+  
+* `JOB`  
+* `CAR_TYPE`  
+  
+There is one ordinal, categorical predictor:  
+ 
+* `EDUCTATION`  
+  
+Finally, there are four predictors that express dollar amounts.  These variables are effectively continuous:  
+
+* `INCOME`  
+* `HOME_VAL`
+* `BLUEBOOK`  
+* `OLDCLAIM`  
+
+Now, let's review a high level statistical summary of the variables:  
+  
+```{r}
+options(width=95)
+summary(auto) 
+
+```
+  
+We notice a variety of missing values and strange field entries that may reflect data errors.  These issues will be address in a later section.  
+  
+Let's now focus on each variable individually.  
+  
+<br>  
+  
+#### TARGET Variables  
+  
+**TARGET_FLAG**  
+  
+The response variable `TARGET_FLAG` has a moderate imbalance, with three-quarters of the observations indicating no crashes.  
+
+```{r}
+tbl <- with(auto,rbind(round(addmargins(table(TARGET_FLAG)),0),
+                       addmargins(prop.table(table(TARGET_FLAG)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+```  
+  
+**TARGET_AMT**  
+  
+The other response, `TARGET_AMT`, exhibits extreme, positive skewness and high kurtosis. 
+  
+```{r}
+options(width=100)
+round(with(auto, c(summary(TARGET_AMT), StdD=sd(TARGET_AMT), Skew=skewness(TARGET_AMT), Kurt=kurtosis(TARGET_AMT))),2)
+```  
+  
+We already noted that almost three quarters of records indicate no car crash.  In these cases, the `TARGET_AMT` has a zero value.
+
+For modeling purposes, however, we will only be interested in dollar amounts where a crash occurred.  Going forward, when performing calculations and summaries involving `TARGET_AMT`, we will use a subset of the data where zero amounts are filtered out.  
+
+
+Here is a summary of the zero-truncated `TARGET_AMT` variable:  
+  
+```{r}
+options(width=100)
+auto_censor <- auto[auto$TARGET_FLAG == 1,]
+round(with(auto_censor,c(summary(TARGET_AMT), StdD=sd(TARGET_AMT), Skew=skewness(TARGET_AMT), Kurt=kurtosis(TARGET_AMT))),2)
+
+```
+  
+Even after we remove the zero values, the variable remains highly skewed:  
+
+```{r}
+
+
+
+h <- ggplot(auto_censor, aes(TARGET_AMT)) + 
+  geom_histogram(color="ghostwhite", fill="steelblue4") +
+  theme_classic()+ labs(title = 'Histogram of TARGET_AMT') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) 
+
+b <- ggplot(auto_censor, aes(x="",y=TARGET_AMT)) + 
+  geom_boxplot(color="ghostwhite", fill="steelblue4",outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'Boxplot of TARGET_AMT') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) + coord_flip() + 
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)
+
+
+grid.arrange(h,b, ncol=2)
+
+```
+  
+<br>  
+  
+#### Count Variables  
+  
+**KIDSDRIV**  
+
+The discrete variable `KIDSDRIV` is right skewed, with 88% of insureds in the training data having no teenage drivers in the household.  
+
+```{r}
+
+tbl <- with(auto, rbind(addmargins(table(KIDSDRIV)),addmargins(prop.table(table(KIDSDRIV)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+round(with(auto,c(summary(KIDSDRIV), StdD=sd(KIDSDRIV), Skew=skewness(KIDSDRIV), Kurt=kurtosis(KIDSDRIV))),2)
+```  
+
+In the barplot below, we see different a slightly different distribution of policyholders involved in crashes vis-a-vis the incident-free insureds.  Specifically, we see slightly higher concentration of individuals teenage drivers.  The scatter plot also indicates a relationship between relationship between number of teenage drivers and the log odds of an auto incident.  
+  
+We also plot the the log TARGET_AMT--given that a crash occurred--against `KIDSDRIV`.  Note: we applied the log transformation because `TARGET_AMT` is highly right skewed, and the directional relationship with `KIDSDRIV` should be clearer in this form.  
+
+While not entirely clear in the boxplot, there appears to be a rough, positive relationship between `KIDSDRIV` and the median cost of the crash.  The relationship with the mean crash amount, however, is less clear.  
+
+
+```{r}
+
+bc <- ggplot(auto, aes(KIDSDRIV, fill=factor(TARGET_FLAG))) + 
+  geom_bar(aes(y = ..prop..), position="dodge", color="ghostwhite") +
+  theme_classic()+ labs(title = 'KIDSDRIV Prop by TARGET_FLAG') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) 
+ 
+ 
+bp <- ggplot(auto_censor, aes(factor(KIDSDRIV), log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by KIDSDRIV', x = "KIDSDRIV") + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+lo <- auto %>%
+  group_by(KIDSDRIV) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp <- ggplot(lo, aes(KIDSDRIV,logodds)) + 
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue4', size=4, stroke=0.75) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by KIDSDRIV') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=F, linetype='dotted') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+  
+
+  
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1)
+```  
+  
+```{r}
+t <-auto[auto$TARGET_AMT > 0,] %>%
+  group_by(KIDSDRIV) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+```
+ 
+  
+**HOMEKIDS**  
+  
+Numerical distribution and statistical summaries are presented below:  
+
+```{r}
+tbl <- with(auto, rbind(addmargins(table(HOMEKIDS)),addmargins(prop.table(table(HOMEKIDS)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+round(with(auto,c(summary(HOMEKIDS), StdD=sd(HOMEKIDS), Skew=skewness(HOMEKIDS), Kurt=kurtosis(HOMEKIDS))),2)  
+
+```  
+The distribution of this discrete variable is right skewed, but not to the same extent as `KIDSRIV`.  `HOMEKIDS` contains some of the same information as `KIDSDRIV`: presumably, some of the reported children are also drivers.  
+  
+Let's look plots relating this predictor to the target variables:  
+
+```{r}
+bc <- ggplot(auto, aes(HOMEKIDS, fill=factor(TARGET_FLAG))) + 
+  geom_bar(aes(y = ..prop..), position="dodge", color="ghostwhite") +
+  theme_classic()+ labs(title = 'HOMEKIDS Prop by TARGET_FLAG') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) 
+ 
+ 
+bp <- ggplot(auto_censor, aes(factor(HOMEKIDS), log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by HOMEKIDS', x = "HOMEKIDS") + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+lo <- auto %>%
+  group_by(HOMEKIDS) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp <- ggplot(lo, aes(HOMEKIDS,logodds)) + 
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue4', size=4, stroke=0.75) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by HOMEKIDS') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=F, linetype='dotted') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1)
+   
+```
+  
+The barplot provides some evidence that policyholders with crashes tend to have more children than than insureds not involved in an auto incident. The scatterplot indicates a significant difference in log odds between policyholders with children vs. insureds without children.  We discount the observation associated with five children due to the small sample size.    
+
+There appears to be a subtle relationship between `HOMEKIDS` and the median cost of crashes.  The relationship with the mean is less clear, given the highly variable and skewed distribution of crash amounts.  
+
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(HOMEKIDS) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+```
+
+**CLM_FREQ**  
+  
+Let's review numerical and statistical summaries for `CLM_FREQ`, another discrete count variable:  
+
+```{r}
+tbl <- with(auto, rbind(addmargins(table(CLM_FREQ)),addmargins(prop.table(table(CLM_FREQ)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+round(with(auto,c(summary(CLM_FREQ), StdD=sd(CLM_FREQ), Skew=skewness(CLM_FREQ), Kurt=kurtosis(CLM_FREQ))),2)  
+
+```   
+  
+This variable has a similar skew as the previously reviewed count variable, `HOMEKIDS`.  
+  
+Based on the barplot below, there seems to be a significance difference in the distribution of prior claim frequencies for `TARGET_FLAG` values of zero vs. one.  We see roughly 60% of auto claimants have had one or more prior claims in the past five year, while only 40% of non-claimants have had accidents.  The scatter plot indicates a nonlinear albeit positive relationship between log odds of a claim and prior claim history. We also do not see a clear pattern between `CLM_FREQ` and the claim amounts.  
+
+```{r}
+bc <- ggplot(auto, aes(CLM_FREQ, fill=factor(TARGET_FLAG))) + 
+  geom_bar(aes(y = ..prop..), position="dodge", color="ghostwhite") +
+  theme_classic()+ labs(title = 'CLM_FREQ Prop by TARGET_FLAG') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) 
+ 
+ 
+bp <- ggplot(auto_censor, aes(factor(CLM_FREQ), log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by CLM_FREQ', x = "CLM_FREQ") + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+lo <- auto %>%
+  group_by(CLM_FREQ) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp <- ggplot(lo, aes(CLM_FREQ,logodds)) + 
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue', size=4, stroke=0.75) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by CLM_FREQ') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=F, linetype='dotted') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1) 
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(CLM_FREQ) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+```
+  
+**MVR_PTS**  
+   
+Like the other count variables, `MVR_PTS` is positively skewed.  There seems to be a positive relationship between points and log odds; however the scatter plot below indicates a strange, curved relationship between the two variables.  We wonder if the curvature is related to to interaction with another predictor.  
+  
+We see no straightforward relationship between `TARGET_AMT` and `MVR_PTS`.  
+
+```{r}
+options(width=90)
+tbl <- with(auto, rbind(addmargins(table(MVR_PTS)),addmargins(prop.table(table(MVR_PTS)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+round(with(auto,c(summary(MVR_PTS), StdD=sd(MVR_PTS), Skew=skewness(MVR_PTS), Kurt=kurtosis(MVR_PTS))),2)  
+
+```    
+  
+```{r}
+bc <- ggplot(auto, aes(MVR_PTS, fill=factor(TARGET_FLAG))) + 
+  geom_bar(aes(y = ..prop..), position="dodge", color="ghostwhite") +
+  theme_classic()+ labs(title = 'MVR_PTS Prop by TARGET_FLAG') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = element_rect(fill='lightblue')) +
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) 
+ 
+ 
+bp <- ggplot(auto_censor, aes(factor(MVR_PTS), log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by MVR_PTS', x = "MVR_PTS") + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+lo <- auto %>%
+  group_by(MVR_PTS) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp <- ggplot(lo, aes(MVR_PTS,logodds)) + 
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue', size=4, stroke=0.75) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by MVR_PTS') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=F, linetype='dotted') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1) 
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(BIN_MVR=2*floor(MVR_PTS/2)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+```
+  
+#### Time Variables  
+  
+**AGE**  
+
+Below is table of values of the `AGE` predictor, with ages bucketed into 5 year increments (i.e. [15,20), [20,25), [30,35), etc.])
+
+```{r}
+options(width=100)
+
+tbl <- with(auto, rbind(addmargins(table(5*floor(AGE/5))),addmargins(prop.table(table(5*floor(AGE/5))))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+
+```  
+  
+Here is a statistical summary:  
+  
+```{r}
+options(width=100)
+round(with(auto,c(summary(AGE), StdD=sd(AGE, na.rm=T), Skew=skewness(AGE, na.rm=T),
+                  Kurt=kurtosis(AGE, na.rm=T))),2)
+
+```
+  
+We note six missing values that we'll need to address later.  
+
+The distribution of `AGE` is almost perfectly normal. When we break out the data by `TARGET_FLAG` values, the distributions of age by `TARGET_FLAG` are still roughly normal.  However, individuals involved in a crash appear to be slightly younger, on average.  
+  
+In the bottom left scatter plot, we notice a pattern between log odds and age.  Specifically, there appears to be a curved relationship where younger ages have a higher odds of a crash.  The odds continue to decrease until around age 60, when costs begin to trend upward again.  
+
+`TARGET_AMT` appears to be slightly higher for both younger (< 25) and older (>60) drivers, but the differences appear to be subtle.
+  
+```{r}
+
+h1 <- ggplot(auto, aes(AGE)) + geom_histogram(binwidth = 2, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(AGE, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 2, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$AGE_5 <- 5 * floor(auto$AGE / 5)
+#auto$AGE_10 <- 10 * floor(auto$AGE / 10)
+
+lo <- auto %>%
+  group_by(AGE) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(AGE,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by AGE') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=F, formula='y ~ poly(x, 2)') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(AGE, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(AGE)) %>%
+  group_by(AGEBIN=10*floor(AGE/10)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+
+
+**YOJ**  
+  
+`YOB` refers to the number of years in the insured's current job.    
+  
+Here is a numerical summary, binned in 2 year increments:  
+
+```{r}
+
+
+tbl <- with(auto, rbind(addmargins(table(2*floor(YOJ/2))),addmargins(prop.table(table(2*floor(YOJ/2)))*100)))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+```
+  
+Below is the statistical summary:  
+
+```{r}  
+options(width=90)
+round(with(auto,c(summary(YOJ), StdD=sd(YOJ, na.rm=T), Skew=skewness(YOJ, na.rm=T),
+                  Kurt=kurtosis(YOJ, na.rm=T))),2)
+```  
+  
+We have a significant number of NA records--454, or 5.6%--that we'll need to address.  
+  
+The variable would be approximately normally distributed if it weren't for the high percentage of individuals with less than one year on the job.  
+  
+Insureds with accidents have a relatively high proportion of individuals with less than a year on the job.    
+  
+The relationship between log odds and `YOB` appears to be complex--see the fitted loess curve below.  
+  
+The relationship between `YOJ` and `TARGET_AMT` is also not very clear.  
+
+```{r}
+
+h1 <- ggplot(auto, aes(YOJ)) + geom_histogram(binwidth = 1, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of YOJ') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(YOJ, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 1, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by YOJ') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$YOJ_5 <- 5 * floor(auto$YOJ / 5)
+#auto$YOJ_10 <- 10 * floor(auto$YOJ / 10)
+
+lo <- auto %>%
+  group_by(YOJ) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(YOJ,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by YOJ') + 
+  geom_smooth(method='loess', color='darkred', size=0.75, se=F) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(YOJ, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by YOJ') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(YOJ)) %>%
+  group_by(YOJBIN=4*floor(YOJ/4)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+  
+**TRAVTIME**  
+  
+Here is a summary of `TRAVTIME`, the commuting distance to work, in bins of 10 minutes:  
+
+```{r}
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(10*floor(TRAVTIME/10))),addmargins(prop.table(table(10*floor(TRAVTIME/10)))*100)))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+Here is a statistical summary:  
+```{r}
+options(width = 90)
+round(with(auto,c(summary(TRAVTIME), StdD=sd(TRAVTIME, na.rm=T), Skew=skewness(TRAVTIME, na.rm=T),
+                  Kurt=kurtosis(TRAVTIME, na.rm=T))),2)
+```  
+  
+The distribution has a slight positive skew.  The subset of insureds with no accidents have a higher proportion of individuals with short commute times.  In the scatterplot below, we notice a generally positive relationship between log odds and `TRAVETIME`.  Some of the curvature in the loess curve is likely driven by small sample sizes for long commute times.  
+  
+Finally, we see a slight, upward curvature in the log of `TARGET_AMT` for long commute times.  Judging from the loess curve confidence interval, this upward trend may not be statistically significant.  
+  
+
+```{r}
+
+h1 <- ggplot(auto, aes(TRAVTIME)) + geom_histogram(binwidth = 5, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of TRAVTIME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(TRAVTIME, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 5, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by TRAVTIME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$TRAVTIME_5 <- 5 * floor(auto$TRAVTIME / 5)
+#auto$TRAVTIME_10 <- 10 * floor(auto$TRAVTIME / 10)
+
+lo <- auto %>%
+  group_by(TRAVTIME) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(TRAVTIME,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by TRAVTIME') + 
+  geom_smooth(method='loess', color='darkred', size=0.75, se=F) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(TRAVTIME, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by TRAVTIME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(TRAVTIME)) %>%
+  group_by(TRAVBIN=15*floor(TRAVTIME/15)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+  
+**TIF**  
+  
+Here is a distribution of time in force values in bins of 2 year increments:  
+```{r}  
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(2*floor(TIF/2))),addmargins(prop.table(table(2*floor(TIF/2)))*100)))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+  
+Here is the statistical summary:
+```{r}
+options(width = 90)
+round(with(auto,c(summary(TIF), StdD=sd(TIF, na.rm=T), Skew=skewness(TIF, na.rm=T),
+                  Kurt=kurtosis(TIF, na.rm=T))),2)
+```  
+  
+The distribution is somewhat positively skewed.  We see somewhat small sub-samples for `TIF` values of 2-3 and 8-9.  Also, the log odds vs. `TIF` scatterplot suggests a quadratic relationship.   
+  
+Finally, there does not seem to be a significant relationship between log of `TARGET_AMT` and  `TIF`.  
+  
+
+
+
+```{r}
+
+h1 <- ggplot(auto, aes(TIF)) + geom_histogram(binwidth = 3, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of TIF') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(TIF, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 3, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by TIF') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$TIF_5 <- 5 * floor(auto$TIF / 5)
+#auto$TIF_10 <- 10 * floor(auto$TIF / 10)
+
+lo <- auto %>%
+  group_by(TIF) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(TIF,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by TIF') + 
+  geom_smooth(method='loess', color='darkred', size=0.75, se=F) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(TIF, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) Prop by TIF') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```   
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(TIF)) %>%
+  group_by(TIFBIN=4*floor(TIF/4)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+  
+**CAR_AGE**  
+  
+The predictor `CAR_AGE` describes the age in years of the insured's car.  Below we bin the data in increments of three:  
+
+```{r}
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(3*floor(CAR_AGE/3))),addmargins(prop.table(table(3*floor(CAR_AGE/3)))*100)))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+  
+Here is the statistical summary:  
+```{r}  
+options(width = 90)
+round(with(auto,c(summary(CAR_AGE), StdD=sd(CAR_AGE, na.rm=T), Skew=skewness(CAR_AGE, na.rm=T),
+                  Kurt=kurtosis(CAR_AGE, na.rm=T))),2)
+```    
+   
+There is an observation that indicates a `CAR_AGE` value of -3.  This is clearly an error.  Also, there are 510 missing observations, representing 6% of total records.  1934 out of the 8161 (25%) of the records have a value of one.  
+  
+Surprisingly, `CAR_AGE` appears to be negatively correlated with the log odds of a claim.  Perhaps there is a confounding variable responsible for this result.  
+  
+Finally, we expected to see a stronger relationship between `CAR_AGE` and the log of `TARGET_AMT`.  
+Our intuition was that payouts go down with the age of the car, as replacement value goes down with age.  However, the bottom right scatter plot below does not seem to indicate a significant association.  
+
+```{r}
+
+h1 <- ggplot(auto, aes(CAR_AGE)) + geom_histogram(binwidth = 2, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of CAR_AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+h2 <- ggplot(auto, aes(CAR_AGE, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 2, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by CAR_AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$CAR_AGE_5 <- 5 * floor(auto$CAR_AGE / 5)
+#auto$CAR_AGE_10 <- 10 * floor(auto$CAR_AGE / 10)
+
+lo <- auto %>%
+  group_by(CAR_AGE) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(CAR_AGE,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Claim by CAR_AGE') + 
+  geom_smooth(method='loess', color='darkred', size=0.75, se=F) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(CAR_AGE, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) Prop by CAR_AGE') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(CAR_AGE)) %>%
+  group_by(CAR_AGE=4*floor(CAR_AGE/4)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+
+  
+#### Binary Variables  
+  
+**PARENT1**  
+  
+Here is a record summary for `PARENT1`, a binary variable indicating if an insured is a single parent.  
+
+```{r}
+ct <- addmargins(table(auto$PARENT1))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+The vast majority (87%) of individuals in the training data are not single parents.  
+
+Let's explore the relationship with `TARGET_FLAG`  
+
+```{r}
+
+tbl <- addmargins(table(PARENT1=auto$PARENT1,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Now let's review the proportions of individuals involved in a crash, given `PARENT1` status:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+The is a 20% difference in the calculated proportions.  This difference is statistically significant:  
+  
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+Finally, lets review the relationship of `PARENT1` with `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(PARENT1, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by PARENT1') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(PARENT1) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+
+The distribution of log amounts is pretty similar for both values of `PARENT1`, with perhaps a very modest increase for single parent insureds.  
+
+**MSTATUS**  
+  
+The predictor, `MSTATUS`, refers to the married status of the policyholder.  
+
+```{r}
+ct <- addmargins(table(auto$MSTATUS))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+There is a fairly balanced split (60/40) between married and single insureds.  
+
+Let's look at the relationship with `TARGET_FLAG`  
+
+```{r}
+
+tbl <- addmargins(table(MSTATUS=auto$MSTATUS,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Now let's review the proportions of individuals involved in a crash, given `MSTATUS` status:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+The 12% difference in proportions is statistically significant:  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Now lets explore the relationship of `MSTATUS` with `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(MSTATUS, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by MSTATUS') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```  
+  
+
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(MSTATUS) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+The distribution of log amounts is very similar across `MSTATUS` type. Non married individuals appear to have a slightly higher average log cost compared to the married cohort.  However, median costs are almost identical between the two cohorts. 
+  
+**SEX**  
+  
+The variable, `SEX`, denotes the gender of the insured policyholder.  
+  
+
+```{r}
+ct <- addmargins(table(auto$SEX))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+The split between males and females is split almost 50/50.  
+
+Let's review the relationship with `TARGET_FLAG`.  
+
+```{r}
+
+tbl <- addmargins(table(SEX=auto$SEX,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Here are the proportions of individuals involved in a crash, given gender type:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+The 2% difference in proportions is not statistically significant:  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Now lets explore the relationship of `SEX` with `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(SEX, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by SEX') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(SEX) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+
+The log dollar cost of claims seems to be slightly higher for males, on average.   
+  
+**CAR_USE**  
+  
+`CAR_USE` is a predictor that indicates how the vehicle is uses (i.e. commercial or private purposes).  
+
+
+```{r}
+ct <- addmargins(table(auto$CAR_USE))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+The majority of the observations involve private use vehicles, at 60%.  
+
+Let's explore the relationship with `TARGET_FLAG`.  
+
+```{r}
+
+tbl <- addmargins(table(CAR_USE=auto$CAR_USE,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Below are the proportions of individuals involved in a crash, given the `CAR_USE` indicator:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+There is a 13% difference in proportions between the two cohorts.  This result is statistically significant.  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Finally, lets explore the relationship of `CAR_USE` with `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(CAR_USE, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by CAR_USE') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(CAR_USE) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+The log dollar cost of claims involving commercial transit appears to somewhat higher than costs associated with private transportation.  
+  
+**RED_CAR**  
+  
+`RED_CAR` is a binary predictor indicating whether a care is primarily red in color.  
+
+
+```{r}
+ct <- addmargins(table(auto$RED_CAR))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+We see only 30% of vehicles in the red category.  
+
+Let's look at the relationship with `TARGET_FLAG`.  
+
+```{r}
+
+tbl <- addmargins(table(RED_CAR=auto$RED_CAR,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Here are the proportions of individuals involved in a crash, given the `RED_CAR` status:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+There is only 1% difference in proportions between red and non-red cars.  The result is not statistically significant.  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Now, we'll explore the relationship between `RED_CAR` and `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(RED_CAR, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by RED_CAR') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(RED_CAR) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+The distribution for each cohort is very similar, with an subtle uptick in average log costs for red car types.  
+  
+**REVOKED**  
+  
+The variable `REVOKED` indicates whether a driver's license has been suspended within the last seven years.    
+
+
+```{r}
+ct <- addmargins(table(auto$REVOKED))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+Only 12% of drivers in the training data have a former license suspension on record.  
+
+
+Here is a look look at the relationship of `REVOKED` with `TARGET_FLAG`.  
+
+```{r}
+
+tbl <- addmargins(table(REVOKED=auto$REVOKED,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Below are the proportions of individuals involved in a crash, given the `REVOKED` status:  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+There is statistically significant difference in proportions by `REVOKED` type, with a 20% observed difference in the training data.  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Finally, let's explore the relationship between `REVOKED` and `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(REVOKED, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by REVOKED') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(REVOKED) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+  
+The distribution for each cohort is very similar.  In the training data, we very slight increase in average log costs for folks that have not had their license suspended.  However, the median log cost seems to be slightly higher for folks with a prior suspended license.  
+  
+**URBANICITY**  
+    
+The predictor `URBANICITY` indicates whether the environment in which the driver primarily drives:  urban vs. rural.    
+
+
+```{r}
+ct <- addmargins(table(auto$URBANICITY))
+per <- round(ct / ct['Sum']* 100,1)
+rbind(count=ct, percent=per)
+```
+    
+Only 30% of drivers in the training data are categorized as being in a rural environment.  .  
+
+
+Let's look at the relationship of `URBANICITY` with `TARGET_FLAG`.  
+
+```{r}
+
+tbl <- addmargins(table(URBANICITY=auto$URBANICITY,TARGET_FLAG=auto$TARGET_FLAG))
+tbl
+```
+  
+Her are the proportions of individuals involved in a crash, given the `URBANICITY` category :  
+```{r}
+round(prop.table(tbl[1:2,1:2], margin=1),2)
+```
+  
+There is a huge difference, 24%, between the two proportions.  Urban drivers appear to be significantly more at risk for being involved in a crash.  
+
+```{r}
+prop.test(tbl[1:2,1:2])
+
+```
+  
+  
+Let's review the relationship between `URBANICITY` and `TARGET_AMT`.  
+  
+```{r}  
+bp <- ggplot(auto_censor, aes(URBANICITY, log(TARGET_AMT))) + 
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by URBANICITY') + 
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  + 
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+bp
+
+```
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(URBANICITY) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+Urban drivers tend to have somewhat higher claim costs, given a crash.  There also appears to be more variability in claim costs for urban drivers compared to their rural counterparts.  
+  
+#### Multinomial Categorical Variables  
+  
+**JOB**  
+
+The variable `JOB` indicates the insured's job category.  there is also blank category which we interpret to mean unknown or not working.    
+
+```{r}
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(JOB)),addmargins(prop.table(table(JOB)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+  
+Here is a breakdown of job categories by `TARGET_FLAG`:  
+
+```{r}
+tbl <- with(auto, addmargins(table(JOB, TARGET_FLAG)))
+tbl
+
+```  
+
+Let's calculate the proportion of observations by job category in each `TARGET_FLAG` indicator:  
+
+```{r}
+pt <- round(prop.table(tbl[1:9,1:2], margin=1),2)
+pt
+
+```
+  
+There appears to be significant variability in the probability of a claim by occupational category, with students and blue collar jobs leading the pack.  
+
+We reject the null hypothesis that all proportions are identical:  
+```{r}
+prop.test(tbl[1:9,1:2])
+
+```
+
+
+
+
+```{r}
+
+bc <- ggplot(auto, aes(x=reorder(JOB, JOB,function(x) length(x)))) + 
+  geom_bar(aes(y = ..prop.., group=1),color="ghostwhite", fill="steelblue4") + 
+  theme_classic()+ labs(title = 'JOB Prop') +
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) + 
+  scale_x_discrete(labels=c('Dr','Unk', 'Hmkr', 'Stud', 'Law', 'Mgmt', 'Prof','Clr','BlCol')) + 
+  labs(x="JOB") + coord_flip()
+  
+
+bp <- ggplot(auto_censor, aes(factor(JOB), log(TARGET_AMT))) +
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by JOB', x = "JOB") +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+lo <- auto %>%
+  group_by(JOB) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+
+sp <- ggplot(lo, aes(JOB,logodds)) +
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue', size=4, stroke=0.75) +
+  theme_classic()+ labs(title = 'Log Odds Claim by JOB') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue")) + 
+  scale_x_discrete(labels=c('','BlCol','Clr', 'Dr', 'Hmkr', 'Law', 'Mgmt', 'Prof','Stud'))
+
+
+
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1)  
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(JOB) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+
+  
+There is moderate variability in log costs across job categories, with the unknown, student, and professional, and manager categories appearing to have higher median costs than than other five categories.  The relationship are somewhat different though when viewing mean costs (or  mean log costs) by category.  
+  
+**CAR_TYPE**  
+
+The predictor `CAR_TYPE` indicates the insured's vehicle type.     
+
+```{r}
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(CAR_TYPE)),addmargins(prop.table(table(CAR_TYPE)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+  
+Here is a breakdown of CAR_TYPE categories by `TARGET_FLAG`:  
+
+```{r}
+tbl <- with(auto, addmargins(table(CAR_TYPE, TARGET_FLAG)))
+tbl
+
+```  
+
+We'll now calculate the proportion of observations by CAR_TYPE category in each `TARGET_FLAG` indicator:  
+
+```{r}
+pt <- round(prop.table(tbl[1:6,1:2], margin=1),2)
+pt
+
+```
+  
+There is significant variability in the probability of a claim by occupational category, with sports cars having the highest proportion of accidents, and minivan have the lowest proportion.    
+
+We reject the null hypothesis that all proportions are identical:  
+```{r}
+prop.test(tbl[1:6,1:2])
+
+```
+
+
+
+
+```{r}
+
+bc <- ggplot(auto, aes(x=reorder(CAR_TYPE, CAR_TYPE,function(x) length(x)))) + 
+  geom_bar(aes(y = ..prop.., group=1),color="ghostwhite", fill="steelblue4") + 
+  theme_classic()+ labs(title = 'CAR_TYPE Prop') +
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) + 
+  labs(x="CAR_TYPE") + coord_flip()
+
+#scale_x_discrete(labels=c('Dr','Unk', 'Hmkr', 'Stud', 'Law', 'Mgmt', 'Prof','Clr','BlCol')) + 
+ 
+
+bp <- ggplot(auto_censor, aes(factor(CAR_TYPE), log(TARGET_AMT))) +
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by CAR_TYPE', x = "CAR_TYPE") +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+lo <- auto %>%
+  group_by(CAR_TYPE) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+
+sp <- ggplot(lo, aes(CAR_TYPE,logodds)) +
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue', size=4, stroke=0.75) +
+  theme_classic()+ labs(title = 'Log Odds Claim by CAR_TYPE') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue")) +
+  scale_x_discrete(labels=c('MV','PnlTrk','PkpTrk', 'SptCar', 'SUV', 'Van'))
+  
+  
+
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1)  
+
+```  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(CAR_TYPE) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```
+  
+Panel trucks and vans appear to have significantly higher log claim costs compared to other car types.  
+  
+#### Ordinal Categorical Variables  
+
+**EDUCATION**  
+
+The variable `EDUCATION` denotes the insured's highest level of education attained.     
+
+```{r}
+options(width=100)
+tbl <- with(auto, rbind(addmargins(table(EDUCATION)),addmargins(prop.table(table(EDUCATION)))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+```  
+  
+Below is a breakdown of EDUCATION categories by `TARGET_FLAG`:  
+
+```{r}
+tbl <- with(auto, addmargins(table(EDUCATION, TARGET_FLAG)))
+tbl
+
+```  
+
+Let's review the proportion of observations by EDUCATION category in each `TARGET_FLAG` indicator:  
+
+```{r}
+pt <- round(prop.table(tbl[1:4,1:2], margin=1),2)
+pt
+
+```
+  
+There are statistically significant differences between the categories, with higher levels of educational attainment associated with lower probabilities of crashes.        
+
+```{r}
+prop.test(tbl[1:4,1:2])
+
+```
+
+
+```{r}
+
+bc <- ggplot(auto, aes(x=reorder(EDUCATION, EDUCATION,function(x) length(x)))) + 
+  geom_bar(aes(y = ..prop.., group=1),color="ghostwhite", fill="steelblue4") + 
+  theme_classic()+ labs(title = 'EDUCATION Prop') +
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        legend.text=element_text(size=7),panel.background = element_rect(fill = "lightblue")) + 
+  labs(x="EDUCATION") + coord_flip()
+
+
+bp <- ggplot(auto_censor, aes(factor(EDUCATION), log(TARGET_AMT))) +
+  geom_boxplot(fill="steelblue4", color = "ghostwhite", outlier.color="steelblue4", outlier.size = 0.5) +
+  theme_classic()+ labs(title = 'log(TARGET_AMT) by EDUCATION', x = "EDUCATION") +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  stat_summary(fun.y=mean, colour="darkred", geom="point", shape=16, size=2)  +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+lo <- auto %>%
+  group_by(EDUCATION) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/
+                                                                     length(TARGET_FLAG))),3))
+
+sp <- ggplot(lo, aes(EDUCATION,logodds)) +
+  geom_point(shape=21, color = "ghostwhite", fill='steelblue', size=4, stroke=0.75) +
+  theme_classic()+ labs(title = 'Log Odds Claim by EDUCATION') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue")) 
+  
+
+  
+
+
+grid.arrange(grid.arrange(bc,sp, ncol=2),bp, ncol=1)  
+
+```   
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  group_by(EDUCATION) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+Interestingly, the `TARGET_AMT` appears to have a positive association with the level of `EDUCATION`.  
+  
+#### Continuous Variables  
+  
+**INCOME**  
+
+Below is table of values of the `INCOME` predictor, with wage bucketed into $30K increments (i.e. [0,30), [30,60), [60,90), etc.])
+
+```{r}
+options(width=130)
+
+tbl <- with(auto, rbind(addmargins(table(30*floor(INCOME/30))),addmargins(prop.table(table(30*floor(INCOME/30))))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+
+
+```  
+  
+Here is a statistical summary:  
+  
+```{r}
+options(width=100)
+round(with(auto,c(summary(INCOME), StdD=sd(INCOME, na.rm=T), Skew=skewness(INCOME, na.rm=T),
+                  Kurt=kurtosis(INCOME, na.rm=T))),2)
+
+```
+  
+There are some missing values, 445 (5.4% of total), that we'll address later.  
+
+The distribution of `INCOME` is right skewed, with a significant number of observations indicating $0 in income.  
+
+Individuals involved in crashes appear to have a high proportion of low-wage earners.  We see the log-odds of a crash decreasing with increases to income--see the lower left scatter plot and loess curve.  We see the loess curve starting to bend upward around $210k, although this phenomenon is possibly due to sparse data for high wage earners.    
+  
+Finally, the relationship between income and log `TARGET_AMT` also does not appear to be very strong.  
+
+  
+```{r}
+
+h1 <- ggplot(auto, aes(INCOME)) + geom_histogram(binwidth = 20, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of INCOME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+h2 <- ggplot(auto, aes(INCOME, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 20, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by INCOME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+
+#auto$INCOME_5 <- 5 * floor(auto$INCOME / 5)
+#auto$INCOME_30  <- auto$INCOME^0.5
+auto$INCOME_30 <- 30 * floor(auto$INCOME / 30)
+
+lo <- auto %>%
+  group_by(INCOME_30) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/length(TARGET_FLAG))),3))
+
+
+  
+sp1 <- ggplot(lo, aes(INCOME_30,logodds)) + 
+  geom_point(color ='steelblue4', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Clm by Binned INCOME') + 
+  geom_smooth(method='loess', color='darkred', size=0.75, se=T) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+
+sp2 <- ggplot(auto_censor, aes(INCOME, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by INCOME') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```   
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(INCOME)) %>%
+  group_by(INCBIN=30*floor(INCOME/30)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+**HOME_VAL**  
+
+Below is table of values of the `HOME_VAL` predictor, with home appraisals bucketed into $50K increments.
+
+```{r}
+options(width=120)
+
+tbl <- with(auto, rbind(addmargins(table(50*floor(HOME_VAL/50))),addmargins(prop.table(table(50*floor(HOME_VAL/50))))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+
+
+```  
+  
+Below is a statistical summary:  
+  
+```{r}
+options(width=100)
+round(with(auto,c(summary(HOME_VAL), StdD=sd(HOME_VAL, na.rm=T), Skew=skewness(HOME_VAL, na.rm=T),
+                  Kurt=kurtosis(HOME_VAL, na.rm=T))),2)
+
+```
+  
+There are some missing values, 464 (5.7% of total).  We'll address these later.  
+
+The distribution of `HOME_VAL` is right skewed, with a large proportion of observations indicating $0 in HOME_VAL--this probably refers to policyholders who are not homeowners.  
+
+Individuals involved in crashes have a higher proportion of low home values.  The loess curve in the lower left scatterplot indicates a decreasing log odds of claim occurrence with increasing incomes.  The upward trend in the curve around $400k is possibly due to the the smaller sample size for higher home values.
+  
+Finally, the relationship between `HOME_VAL` and log `TARGET_AMT` also does not appear to be very strong.  
+
+  
+```{r}
+
+h1 <- ggplot(auto, aes(HOME_VAL)) + geom_histogram(binwidth = 40, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of HOME_VAL') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(HOME_VAL, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 40, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by HOME_VAL') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+#auto$HOME_VAL_5 <- 5 * floor(auto$HOME_VAL / 5)
+auto$HOME_VAL_30 <- 30 * floor(auto$HOME_VAL / 30)
+
+lo <- auto %>%
+  group_by(HOME_VAL_30) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(HOME_VAL_30,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Clm by Binned HOME_VAL') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=T, formula='y ~ poly(x, 2)') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(HOME_VAL, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by HOME_VAL') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(HOME_VAL)) %>%
+  group_by(HOMEVALBIN=50*floor(HOME_VAL/50)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+
+**BLUEBOOK**  
+
+Below is table of values of the `BLUEBOOK` predictor, with values bucketed into $4K increments.
+
+```{r}
+options(width=120)
+tbl <- with(auto, rbind(addmargins(table(4*floor(BLUEBOOK/4))),addmargins(prop.table(table(4*floor(BLUEBOOK/4))))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+
+
+```  
+  
+Here is a statistical summary:  
+  
+```{r}
+options(width=100)
+round(with(auto,c(summary(BLUEBOOK), StdD=sd(BLUEBOOK, na.rm=T), Skew=skewness(BLUEBOOK, na.rm=T),
+                  Kurt=kurtosis(BLUEBOOK, na.rm=T))),2)
+
+```
+  
+The distribution of `BLUEBOOK` is right skewed, like the continuous variables reviewed earlier.
+
+Individuals involved in crashes have a higher proportion of low `BLUEBOOK` values.  The loess curve in the lower left scatterplot indicates a decreasing log odds of claim occurrence with increasing incomes.  However, there is a prominent bend in the curve around \$30k.  Perhaps this upward bend indicates risky driving behavior by owners of luxury and sports cars.  
+  
+Finally, the relationship between BLUEBOOK and log `TARGET_AMT` reveals an increase in payouts with the value of the auto, but the curve flattens out around \$20k - \$30k.    
+
+  
+```{r}
+
+h1 <- ggplot(auto, aes(BLUEBOOK)) + geom_histogram(binwidth = 2, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of BLUEBOOK') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(BLUEBOOK, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 2, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by BLUEBOOK') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+#auto$BLUEBOOK_5 <- 5 * floor(auto$BLUEBOOK / 5)
+auto$BLUEBOOK_2 <- 2 * floor(auto$BLUEBOOK / 2)
+
+lo <- auto %>%
+  group_by(BLUEBOOK_2) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(BLUEBOOK_2,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Clm by Binned BLUEBOOK') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=T, formula='y ~ poly(x, 2)') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(BLUEBOOK, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by BLUEBOOK') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(BLUEBOOK)) %>%
+  group_by(BLUEBKBIN=5*floor(BLUEBOOK/5)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+  
+**OLDCLAIM**  
+
+Below is table of values of the `OLDCLAIM` variable, with values bucketed into $4K increments.
+
+```{r}
+options(width=120)
+tbl <- with(auto, rbind(addmargins(table(4000*floor(OLDCLAIM/4000))),addmargins(prop.table(table(4000*floor(OLDCLAIM/4000))))*100))
+row.names(tbl) <- c('count','percent')
+round(tbl,1)
+
+
+
+
+```  
+  
+Below is a statistical summary:  
+  
+```{r}
+options(width=100)
+round(with(auto,c(summary(OLDCLAIM), StdD=sd(OLDCLAIM, na.rm=T), Skew=skewness(OLDCLAIM, na.rm=T),
+                  Kurt=kurtosis(OLDCLAIM, na.rm=T))),2)
+
+```
+  
+The distribution of `OLDCLAIM` is extremely right skewed.
+
+There does not appear to be a clear relationship between `OLDCLAIM` and log of `TARGET_CLM`.  High previous claim amounts seem to be positively associated with the log odds of a future claim.  However, this relationship appears to take a quadratic form.         
+
+  
+```{r}
+
+h1 <- ggplot(auto, aes(OLDCLAIM)) + geom_histogram(binwidth = 4, fill="steelblue4", color="ghostwhite" ) + 
+  theme_classic() + labs(title = 'Histogram of OLDCLAIM') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+
+h2 <- ggplot(auto, aes(OLDCLAIM, ..density.., fill=factor(TARGET_FLAG))) + 
+  geom_histogram(binwidth = 4, color="ghostwhite", position="identity", alpha=0.5) + 
+  theme_classic() + labs(title = 'TARGET_FLAG Prop by OLDCLAIM') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue")) + 
+  scale_fill_manual("TARGET_FLAG",values=c("steelblue4","cornflowerblue")) + 
+  theme(legend.position = c(1,1),legend.justification  = c(1,1), legend.background = 
+          element_rect(fill='lightblue'))
+
+
+#auto$OLDCLAIM_5 <- 5 * floor(auto$OLDCLAIM / 5)
+auto$OLDCLAIM_4 <- 4 * floor(auto$OLDCLAIM / 4)
+
+lo <- auto %>%
+  group_by(OLDCLAIM_4) %>%
+  summarise(logodds=round(log((sum(TARGET_FLAG)/length(TARGET_FLAG))/(1-sum(TARGET_FLAG)/length(TARGET_FLAG))),3))
+  
+sp1 <- ggplot(lo, aes(OLDCLAIM_4,logodds)) + 
+  geom_point(color ='steelblue', size=1) + 
+  theme_classic()+ labs(title = 'Log Odds Clm by Binned OLDCLAIM') + 
+  geom_smooth(method='lm', color='darkred', size=0.75, se=T, formula='y ~ poly(x, 2)') +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.y=element_text(size=10)) +
+  theme(plot.title = element_text(size=12),panel.background = element_rect(fill = "lightblue"))
+
+
+sp2 <- ggplot(auto_censor, aes(OLDCLAIM, log(TARGET_AMT))) + 
+  geom_point(position="jitter", color="steelblue4", size=1) + 
+  geom_smooth(method = "loess", size=1, color="darkred") + theme_classic() + 
+  labs(title = 'log(TARGET_AMT) by OLDCLAIM') + 
+  theme(plot.title = element_text(hjust = 0.5),axis.title.y=element_text(size=10)) +  
+  theme(plot.title = element_text(size=12),legend.title=element_text(size=8),
+        panel.background = element_rect(fill = "lightblue"))
+
+
+
+grid.arrange(h1,h2,sp1,sp2, ncol=2)
+
+```  
+  
+```{r}
+t <- auto[auto$TARGET_AMT > 0,] %>%
+  filter(!is.na(OLDCLAIM)) %>%
+  group_by(OLD_BIN=5*floor(OLDCLAIM/5)) %>%
+  summarise(ct=n(),mean_cost=round(mean(TARGET_AMT)), median_cost=round(median(TARGET_AMT)))
+
+kable(t)
+
+```  
+
+  
+## Data Preparation  
+  
+#### Missing Values  
+
+The following five variables have missing variables:  
+  
+* AGE: 6 missing values (0.07%)
+* YOJ: 454 missing values (5.6%)
+* CAR_AGE: 510 (6.2%)  
+* INCOME: 445 (5.4%)  
+* HOME_VAL: 464 (5.7%)  
+  
+Because four of the predictors are missing a significant number of records (5%-6%), we will attempt to use a sophisticated imputation procedure from R's MICE package to fill in the missing values.  Our goal in using this procedure is to minimize the introduction of bias in our data vis-a-vis simpler methods like mean substitution.  
+  
+One way to assess the quality of the imputation procedure used in MICE is to compare the distribution of the imputed data to the distribution of the non-missing values.  Let's do that now by reviewing density plots:  
+```{r}
+tmp_data <- mice(auto,maxit=5, method='pmm',seed=20, print=F)
+densityplot(tmp_data)[1:5]
+```
+With the exception of the `AGE` variable, the imputed variables seem to reasonably approximate the original distribution.  
+
+we're only missing a handful of values for `AGE`; so we will apply simply mean imputation for this variable.  
+  
+```{r}
+auto$AGE <- ifelse(is.na(auto$AGE), mean(auto$AGE),auto$AGE)
+tmp_data <- mice(auto,maxit=1, method='pmm',seed=20, print=F)
+auto <- complete(tmp_data,1)
+#auto_censor <- auto[auto$TARGET_FLAG==1,]
+```
+Finally, we'll assume the -3 value for `CAR_AGE` is actually zero.  
+  
+```{r}
+auto$CAR_AGE <- ifelse(auto$CAR_AGE == -3, 0, auto$CAR_AGE)
+
+```
+  
+#### Data Transformation  
+  
+**TARGET_FLAG**  
+No changes.  
+  
+**TARGET_AMT**  
+  
+The response variable `TARGET_AMT` is highly right skewed.  We will use the box-cox procedure to suggest a reasonable transformation when the `TARGET_AMT` variable is positive:  
+
+```{r}
+boxcoxfit(auto$TARGET_AMT[auto$TARGET_FLAG==1])
+
+```
+Given this output, We will apply the log transformation.  
+  
+```{r}
+auto$TARGET_AMT_MOD <- log(auto$TARGET_AMT)
+
+```  
+  
+**KIDSDRIV**  
+  
+Given the possible curvature between the log odds and `KIDSDRIV`, we're going to introduce a centered version of this variable to reduce possible collinearity issues. 
+  
+```{r}
+auto$KIDSDRIV_MOD <- scale(auto$KIDSDRIV, scale=F)
+```  
+  
+**HOMEKIDS**  
+  
+We will create another centered version of this variable due to a possible quadratic relationship with the response variable, `TARGET_FLAG.`  Again, our intent with this transformation is avoid multicollinearity issues.    
+  
+```{r}
+auto$HOMEKIDS_MOD <- scale(auto$HOMEKIDS, scale=F)
+```    
+  
+**CLM_FREQ**  
+  
+Once again, we'll center the variable due concerns described earlier.  
+ 
+```{r}
+auto$CLM_FREQ_MOD <- scale(auto$CLM_FREQ, scale=F)
+
+```  
+  
+**MVR_PTS**  
+  
+No changes.  
+  
+**AGE**  
+  
+Age appears to have a quadratic relationship with both `TARGET_FLAG` and `TARGET_AMT`. We'll center the variable. 
+
+```{r}
+auto$AGE_MOD <- scale(auto$AGE, scale=F)
+
+
+```  
+  
+**YOJ**  
+  
+The variable `YOJ` has a significant number of zero observations.  We'll create a mean centered variable, `YOJ_MOD`, that will be used for years on job of 1 or higher.  
+
+```{r}
+#auto$YOJ_ZERO <- ifelse(auto$YOJ == 0,1,0)
+
+# auto$YOJ_MOD <- ifelse(auto$YOJ == 0, 
+#                          mean(auto$YOJ[auto$YOJ !=0]),
+#                          scale(auto$YOJ[auto$YOJ !=0],
+#                                scale=F))
+auto$YOJ_MOD <- scale(auto$YOJ, scale=F)
+
+```  
+  
+**TRAVTIME**  
+Well apply the mean-center transformation.  
+  
+```{r}
+auto$TRAVTIME_MOD <- scale(auto$TRAVTIME, scale=F)
+
+```
+
+**TIF**  
+  
+We'll mean-center the variable to reduce multicollinearity issues if we implement a quadratic term.     
+  
+```{r}
+auto$TIF_MOD <- scale(auto$TIF, scale=F)
+
+```  
+  
+**CAR_AGE**  
+
+No changes.  
+  
+**PARENT1**  
+  
+No changes.  
+  
+**MSTATUS**  
+  
+No changes.  
+  
+**SEX**  
+  
+No changes.  
+  
+**CARUSE**  
+  
+No changes.  
+  
+**RED_CAR**  
+  
+No changes.  
+  
+**REVOKED**  
+  
+No changes.  
+  
+**URBANICITY**  
+  
+No changes.  
+  
+**JOB**  
+  
+No changes.  
+  
+**CAR_TYPE**  
+  
+No changes.  
+  
+**EDUCATION**  
+  
+No changes.  
+  
+**INCOME**  
+  
+Income is a positively skewed variable with a significant number zeroes.  
+
+We will apply the square root transformation suggested by the box-cox procedure to the original variable to reduce the overall skew.  
+
+```{r}
+boxcoxfit(auto$INCOME[auto$INCOME >0])
+auto$INCOME_MOD <- auto$INCOME ^0.5
+```
+  
+**HOME_VAL**  
+  
+Home values are also moderately right skewed with a significant number of zeroes.  
+We'll apply a quarter root transformation to the original variable to reduce the overall skew.   
+  
+```{r}
+boxcoxfit(auto$HOME_VAL[auto$HOME_VAL > 0])
+  
+#auto$HOME_VAL_ZERO <- ifelse(auto$HOME_VAL==0,1,0)
+auto$HOME_VAL_MOD <- auto$HOME_VAL^0.25
+
+```
+  
+**BLUEBOOK**  
+  
+The `BLUEBOOK` variable has a moderate right skew.  We'll apply the square root transformation suggested by the box-cox procedure.  
+
+```{r}
+boxcoxfit(auto$BLUEBOOK)
+auto$BLUEBOOK_MOD <- auto$BLUEBOOK^0.5
+
+```  
+  
+**OLDCLAIM**  
+  
+`OLDCLAIM` is extremely right skewed.  We'll apply a log(x+1) transformation to reduce the overall skew.     
+```{r}
+boxcoxfit(auto$OLDCLAIM[auto$OLDCLAIM>0])
+
+auto$OLD_CLAIM_MOD <- log(auto$OLDCLAIM + 1)  
+
+```  
+  
+## Build Models  
+<br>  
+
+#### Binary Logistic Regression  
+  
+**Model 1: Manual Variable Selection, Linear Terms Only**  
+  
+Based on our data exploration, we believe the following variables could be relevant in predicted whether or not a claim occurs:  
+  
+* `KIDSDRIV`
+* `HOMEKIDS`
+* `CLM_FREQ`  
+* `MVR_PTS`  
+* `AGE`  
+* `YOJ`  
+* `TRAVTIME`  
+* `TIF`  
+* `CAR_AGE`  
+* `PARENT1`  
+* `MSTATUS`  
+* `CAR_USE`  
+* `REVOKED`  
+* `URBANICITY`  
+* `JOB`  
+* `CAR_TYPE`  
+* `EDUCATION`  
+* `INCOME`  
+* `HOMEVAL`  
+* `BLUEBOOK`  
+* `OLDCLAIM`  
+  
+Granted, we haven't narrowed down the list much.   
+  
+Before moving forward, let's calculate variance inflation factors, including all potential predictors in our model.  
+  
+```{r}
+m1 <- glm(TARGET_FLAG ~. -TARGET_AMT -TARGET_AMT_MOD -INDEX -KIDSDRIV -HOMEKIDS -CLM_FREQ -AGE -YOJ -TRAVTIME -TIF -SEX -RED_CAR -INCOME -HOME_VAL -BLUEBOOK -OLDCLAIM
+          -INCOME_30 -HOME_VAL_30 -BLUEBOOK_2 -OLDCLAIM_4,
+          data = auto, family='binomial')
+    
+vif(m1)        
+
+            
+```
+  
+Seeing no major VIF issues--once accounting for degrees of freedom--we will proceed with the model with all suggested predictors.  
+
+```{r}
+summary(m1)
+
+```
+  
+The signs of the coefficients mostly make sense:  
+  
+* We expect claim probabilities to be higher for single parents.  
+* Married individuals should be less prone to accidents compared to singles.  
+* The signs of all the `EDUCATION` levels make sense; however, we expected the Master's and PhD levels to show a greater reduction in log odds relative to the high school reference level. We are not too concerned with this result though, as other variables such as `JOB_TYPE` and `INCOME` help in defining an individual's composite risk profile.  
+* We didn't have solid a priori expectations about the relationship between different job type.  We are not surprised with most of these result though.  For instance, we are not surprised by the increased risk associated with blue collar workers relative to doctors.     
+* The model is consistent with our expectation that private vehicles are less accident prone compared to commercial vehicles.  
+* The car type signs and magnitudes are fairly consistent with our expectations:  Minivans(the reference level) should be safer than the other vehicles.  Sports cars should be most likely to be involved in an accident.  This is what we see.  
+* A revoked license is highly indicative of future accident risk.  
+* MVR points are positively associated with accident risk.  
+* The model shows a slight negative relationship between car age and log odds of an accident, but the result is not statistically significant.  
+* Our model shows much greater risk in urban areas compared to rural geographies.  This is consistent with our expectation.  
+* The number of teenage drivers impacts risk unfavorably, as our model shows.  
+* Our model indicates that more children can adversely impact claims risk.  We didn't have firm expectations about this variable's influence.  More important, our model does not indicate a statistically significant result.  
+* Our model reveals claim risk declining with age.  This is not necessarily surprising; however, the model coefficient is not statistically significant.  
+* Our model shows risk increasing slightly with increases to `YOB`.  This is maybe a strange result, but our model indicates a very high p-value for our coefficient.  
+* We expect risk to increase with longer travel times, as our model shows.  
+* We expect loyal policyholders to be less risky than frequently churning policyholders, as our model indicates.  
+* Our model indicates decreasing log odds with increases to home value.  This is what we would expect.  
+* We are not surprised to see cars with high `BLUEBOOK` values being associated with reduced risk in our model compared to lower values.  
+* The coefficient for prior claims cost is opposite of what we would expect.  However, the coefficient has a high associated p-value; so we may drop this predictor from our model.  
+  
+Let's clean up our model by removing some of the statistically insignificant predictors.  We will leave all `JOB` levels in our model, as the "Manager" and "Clerical" coefficients are highly significant, and two additional levels have p-values below 10%.  
+
+
+```{r}
+m1_mod <- update(m1, . ~ . -CAR_AGE -HOMEKIDS_MOD -AGE_MOD -YOJ_MOD -OLD_CLAIM_MOD)
+
+summary(m1_mod)        
+```  
+All predictors are now statistically significant, with the exception of several of the job types.  The coefficients in our model also still make sense.  
+  
+**Model 2: Add Quadratic Terms to Model 1**
+  
+We noted earlier that there appeared to be quadratic relationship between some predictors and log odds.  
+  
+Starting with our original Model 1--i.e. before we removed the insignificant predictors--we'll add second order polynomial terms for the following variables:  
+  
+  * `KIDSDRIV`  
+  * `HOMEKIDS`  
+  * `CLM_FREQ`  
+  * `AGE`  
+  * `YOJ`  
+  * `TIF`  
+  
+Here is the summary output from model 2:  
+```{r}
+
+m2 <- update(m1, . ~ . + I(KIDSDRIV_MOD^2) + I(HOMEKIDS_MOD^2) + I(CLM_FREQ_MOD^2)
+                                               + I(AGE_MOD^2) + I(YOJ_MOD^2)
+                                                   + I(TIF_MOD^2))
+
+summary(m2)
+
+```
+
+Below our key results from this second model:  
+
+* The first and second order terms for `KIDSDRIV` are both statistically significant.  The negative sign of the second order term makes sense: the unfavorable impact of adding additional children drivers diminishes with each subsequent child.  
+* Neither the first nor second order terms are significant for `HOMEKIDS`.  
+* Both `CLM_FREQ` terms are significant.  The negative second order term indicates diminishing impact of each additional prior claim.  
+* The second order term of `AGE` is statistically significant, but the first first order term is not.  We'll leave both terms in our model. The coefficients of the terms make sense.  There is a primary trend of reduced risk with age--see the negative first order coefficient, but the trend diminishes and potentially reverses for higher ages--as reflected in the positive second order term.  
+* Neither `YOJ` terms are statistically significant.  
+* Both first and second order `TIF` terms are significant.  The signs of the coefficients have an intuitive explanation: there is a primary effect of  risk reduction in risk with increases to `TIF` but the favorable impact diminishes with higher `TIF` values.  
+* `CAR_AGE` is still insignificant in this model.
+  
+Based on the results above, we'll remove all `HOMEKIDS` and `YOJ` terms from our model. Here are the summary results from this modified, second model:  
+  
+```{r}
+m2_mod <- update(m2, . ~ . -YOJ_MOD -HOMEKIDS_MOD -I(YOJ_MOD^2) -I(HOMEKIDS_MOD^2)
+                 - CAR_AGE)
+
+summary(m2_mod)
+```
+  
+**Model 3: Stepwise Regression**  
+  
+For our third model, we'll implement stepwise regression, with variable selecting occurring in both directions.  We'll include all predictors (transformed versions where applicable) in our potential universe of candidates.    
+  
+For simplicity, we'll only include first order terms.  
+  
+```{r}
+
+auto_redux <- auto[,c(9,11,12:14,16,19,20,23:26,32:42,2)]
+
+model.upper <- glm(TARGET_FLAG ~ .,family="binomial", data=auto_redux)
+model.null <- glm(TARGET_FLAG ~ 1, family = "binomial", data=auto_redux)
+ 
+m3 <- step(model.null,scope=list(upper=model.upper, lower=model.null),
+           trace= 0, direction='both')
+
+summary(m3)
+# m4 <- bestglm(Xy=auto_redux, family=binomial,IC="AIC", method="exhaustive", nvmax=3)
+# summary(m4$BestModel)
+names(auto_redux)
+
+```
+  
+Surprisingly, the stepwise procedure produced a model that is identical to our modified Model 1!  
+
+#### Multiple Linear Regression
+
+Now We'll model claim costs using the subset of the training data where claim costs were greater than one.    
+```{r}
+auto_clm <- auto[auto$TARGET_FLAG ==
+                           1,c(9,11,12:14,16,19,20,23:26,32:42,31)]
+```
+  
+Before we build our models, let's check for multicollinearity uses by reviewing variance inflation factors for a linear model that includes all predictors.  
+  
+```{r}
+mymodel <- lm(TARGET_AMT_MOD ~ ., data=auto_clm)
+vif(mymodel)
+```  
+  
+There does not appear to be an issue with mulicollinearity.  
+ 
+**Model 4: Manual Variable Selection, Linear Terms Only**  
+
+Choosing relevant predictors manually is a challenging exercise as most predictors seemed to have only a subtle influence--if any--on claim costs.  
+  
+Based on our exploratory work, we believe the following variables may be relevant:  
+  
+* `AGE`  
+* `KIDSDRIV`  
+* `HOMEKIDS`  
+* `TRAVTIME`  
+* `SEX`  
+* `CAR_USE`  
+* `RED_CAR`  
+* `UBANICITY`  
+* `JOB`  
+* `CARTYPE`  
+* `EDUCATION`  
+* `BLUEBOOK`  
+
+Let's look at a preliminary model using all 12 of our proposed predictors:  
+  
+```{r}
+m4 <- lm(TARGET_AMT_MOD ~ KIDSDRIV_MOD + HOMEKIDS_MOD+ AGE_MOD + TRAVTIME_MOD + SEX + CAR_USE + RED_CAR + URBANICITY + JOB + CAR_TYPE + EDUCATION + BLUEBOOK_MOD , data=auto_clm)
+summary(m4)
+
+
+```
+  
+Only one of our predictors, `BLUEBOOK` appears to be significant in our model.  
+  
+Here is our modified model, with `BLUEBOOK` as the sole predictor:  
+```{r}
+m4_mod <- lm(TARGET_AMT_MOD ~ BLUEBOOK_MOD, data=auto_clm)
+
+summary(m4_mod)
+
+```
+  
+The positive coefficient for `Bluebook` makes sense: we expect the replacement cost and/or repairs for a high-valued car to be more expensive than auto with a low replacement cost.  
+
+**Model 5: Add Quadratic Terms to Model 4**  
+  
+In the exploratory section, we noted potential curved relationship between some predictors and the log of `TARGET_AMT`.  
+  
+Those predictors were `AGE` and `TRAVTIME`.  Let's include squared terms for these two predictors and also for for `BLUEBOOK`:  
+  
+```{r}
+m5 <- update(m4_mod, . ~ . + I(BLUEBOOK_MOD^2) + TRAVTIME_MOD + I(TRAVTIME_MOD^2) + AGE_MOD + I(AGE_MOD^2)) 
+
+summary(m5)
+
+```
+  
+The second order term for `BLUEBOOK` is statistically significant.  The second order term for `AGE` is borderline significant; so we include leave both age variables in our model; but remove terms related to `TRAVTIME`.  
+
+```{r}
+m5_mod <- update(m4_mod, . ~ . + I(BLUEBOOK_MOD^2) + AGE_MOD + I(AGE_MOD^2))
+summary(m5_mod)
+
+```
+  
+This model indicates that log costs increase quadratically with Age.  This result seems possible.  
+
+**Model 6: Stepwise Regression**  
+  
+Finally, we'll perform a basic stepwise regression with variable selection performed in both directions.  For simplicity, we'll only include linear terms.  
+
+```{r}
+
+model.upper <- lm(TARGET_AMT_MOD ~ ., data=auto_clm)
+model.null <- lm(TARGET_AMT_MOD ~ 1, data=auto_clm)
+ 
+m6 <- step(model.null,scope=list(upper=model.upper, lower=model.null),
+           trace= 0, direction='both')
+
+summary(m6)
+
+
+```
+  
+The stepwise procedure included four additional predictors in addition to `BLUEBOOK`:  
+* `MSTATUS`: the negative coefficient indicates the married individuals are less expensive than singles.  This seems reasonable.  
+* `MVR_PTS`: the model indicates a positive association between `MVR_PTS` and claim costs.  This also seems reasonable.  
+* `SEX`: According to the model, males are more expensive than females.  This is consistent with our earlier exploratory work.  
+* `CLM_FREQ_MOD1`:  The coefficient is negative.  This result is counterintuitive.  We would expect folks with a high incidence accident rate to potentially be at risk for higher cost accidents.  For now, we'll leave this predictor in, but we may want do additional analysis.  
+  
+## SELECT MODELS  
+  
+#### Binary Logistic Regression Models  
+  
+Let's compare model fits for all of our models:  
+
+```{r}
+m1_out <- cbind(AIC=AIC(m1), AICc=AICc(m1), BIC = BIC(m1), loglik=logLik(m1))
+m1_mod_out <- cbind(AIC=AIC(m1_mod), AICc=AICc(m1_mod), BIC = BIC(m1_mod), loglik=logLik(m1_mod))
+m2_out <- cbind(AIC=AIC(m2), AICc=AICc(m2), BIC = BIC(m2), loglik=logLik(m2))
+m2_mod_out <- cbind(AIC=AIC(m2_mod), AICc=AICc(m2_mod), BIC = BIC(m2_mod), loglik=logLik(m2_mod))
+m3_out <- cbind(AIC=AIC(m3), AICc=AICc(m3), BIC = BIC(m3), loglik=logLik(m3))
+
+model_comp <- rbind(m1_out, m1_mod_out, m2_out, m2_mod_out, m3_out)
+rownames(model_comp) <- c("m1","m1_mod","m2","m2_mod","m3")
+
+model_comp
+```
+   
+Based on the various model evaluation criteria, model m2_mod appears to be the clear winner.  This model is the binary logistic regression model that included multiple quadratic terms, but removed statistically insignificant predictors from the original model 2 formulation.  
+  
+Model 2 is superior in that the AIC, AIC_c, and BIC measures are lower than all other evaluated models.  The log likelihood is not quite as the original model 2, but this measure does not account for model complexity as the other models do.  
+  
+Let's also compare the AUC measure for all models:  
+  
+```{r}
+# models 1 and 2 prediction probs
+m1_pred <- predict(m1, auto, type="response")
+m1_mod_pred <- predict(m1_mod, auto, type="response")
+m2_pred <- predict(m2, auto, type="response")
+m2_mod_pred <- predict(m2_mod, auto, type="response")
+m3_pred <- predict(m3, auto, type="response")
+
+#AUC
+paste("Model 1:",round(as.numeric(roc(auto$TARGET_FLAG, m1_pred)["auc"]),3))
+paste("Model 1 mod:",round(as.numeric(roc(auto$TARGET_FLAG, m1_mod_pred)["auc"]),3))
+paste("Model 2:",round(as.numeric(roc(auto$TARGET_FLAG, m2_pred)["auc"]),3))
+paste("Model 2 mod:",round(as.numeric(roc(auto$TARGET_FLAG, m2_mod_pred)["auc"]),3))
+paste("Model 3:",round(as.numeric(roc(auto$TARGET_FLAG, m3_pred)["auc"]),3))
+
+```
+  
+Models 2 and Model 2 mod are tied and have the highest AUC measures.  Given that Model 2 mod has fewer parameters than Model 2, the AUC measure supports our contention that Model 2 mod is superior to the other models.  
+  
+Let's explore a summary of our model predictions using the training data:  
+
+```{r}
+mypredict <- predict(m2_mod, auto, type='response')
+
+summary(mypredict)
+```
+  
+We now need to choose an appropriate probability cutoff measure for predicting whether or not an individual will have a claim.  
+  
+We will use Youden's index to determine this optimal cutoff.
+
+```{r}
+myroc <- roc(auto$TARGET_FLAG, mypredict, plot=T, asp=NA,
+                legacy.axes=T, main = "ROC Curve", ret="tp", col="blue")
+coords(myroc, "best", ret='threshold', best.method="youden")
+```
+  
+Using Youden's index, we select a relatively low cutoff measure of 0.276.  With such a low cutoff, we will inevitably sacrifice specificity for gains in sensitivity compared to a traditional 0.5 cutoff.  However, this lower cutoff provides a better balance between precision and recall.    
+
+```{r}  
+predict_target <- ifelse(mypredict >= 0.276, 1, 0)  
+cm <- confusionMatrix(data=predict_target, reference=auto$TARGET_FLAG, positive='1')
+
+cm$table
+
+a <- cm$overall["Accuracy"]; names(a) <- NULL # accuracy
+e <- 1 - a; names(e) <- NULL # error rate
+p <- cm$byClass["Precision"]; names(p) <- NULL  # precision
+st <- cm$byClass["Sensitivity"]; names(st) <- NULL  # sensitivity
+sp <- cm$byClass["Specificity"]; names(sp) <- NULL # specificity
+f1 <- cm$byClass["F1"] ; names(f1) <- NULL # F1
+
+# display metrics
+list(accuracy=a, error_rt = e, precision=p, sensitivity=st, specificity=sp, F1=f1)
+```
+  
+  
+For comparison purposes, here is the confusion matrix and related classification metrics with a 0.5 cutoff.  
+  
+```{r}
+predict_target2 <- ifelse(mypredict >= 0.5, 1, 0)  
+cm <- confusionMatrix(data=predict_target2, reference=auto$TARGET_FLAG, positive='1')
+
+cm$table
+
+a <- cm$overall["Accuracy"]; names(a) <- NULL # accuracy
+e <- 1 - a; names(e) <- NULL # error rate
+p <- cm$byClass["Precision"]; names(p) <- NULL  # precision
+st <- cm$byClass["Sensitivity"]; names(st) <- NULL  # sensitivity
+sp <- cm$byClass["Specificity"]; names(sp) <- NULL # specificity
+f1 <- cm$byClass["F1"] ; names(f1) <- NULL # F1
+
+# display metrics
+list(accuracy=a, error_rt = e, precision=p, sensitivity=st, specificity=sp, F1=f1)
+
+```
+  
+We see that our 0.276 cutoff also results in lower accuracy vis-a-vis the 0.5 threshold.  But our lower threshold also results in better balance in precision vs. recall, as indicated by the improved F1 measure.  
+  
+#### Multiple Regression Models
+  
+We'll review five different measures for assessing our multiple regression models:  
+  
+* R-Squared  
+* Adjusted R-Squared  
+* Root Mean Squared Error  
+* AIC  
+* Corrected AIC  
+* BIC  
+
+```{r}
+RMSE = function(m, o){
+  sqrt(mean((m - o)^2))
+}
+
+# predictions
+p4 <- predict(m4, auto_clm)
+p4_mod <- predict(m4_mod, auto_clm)
+p5 <- predict(m5, auto_clm)
+p5_mod <- predict(m5_mod, auto_clm)
+p6 <- predict(m6, auto_clm)
+              
+
+m4_out <- cbind(R_2=round(summary(m4)$r.squared,4),
+                adj_R_2=round(summary(m4)$adj.r.squared,4),
+                rmse=RMSE(exp(p4),exp(auto_clm$TARGET_AMT_MOD)),
+                AIC=AIC(m4),AICc=AICc(m4),BIC=BIC(m4))
+                
+m4_mod_out <- cbind(R_2=round(summary(m4_mod)$r.squared,4),
+                adj_R_2=round(summary(m4_mod)$adj.r.squared,4),
+                rmse=RMSE(exp(p4_mod),exp(auto_clm$TARGET_AMT_MOD)),
+                AIC=AIC(m4_mod),AICc=AICc(m4_mod),BIC=BIC(m4_mod))
+
+m5_out <- cbind(R_2=round(summary(m5)$r.squared,4),
+                adj_R_2=round(summary(m5)$adj.r.squared,4),
+                rmse=RMSE(exp(p5),exp(auto_clm$TARGET_AMT_MOD)),
+                AIC=AIC(m5),AICc=AICc(m5),BIC=BIC(m5))
+
+m5_mod_out <- cbind(R_2=round(summary(m5_mod)$r.squared,4),
+                adj_R_2=round(summary(m5_mod)$adj.r.squared,4),
+                rmse=RMSE(exp(p5_mod),exp(auto_clm$TARGET_AMT_MOD)),
+                AIC=AIC(m5_mod),AICc=AICc(m5_mod),BIC=BIC(m5_mod))
+
+m6_out <- cbind(R_2=round(summary(m6)$r.squared,4),
+                adj_R_2=round(summary(m6)$adj.r.squared,4),
+                rmse=RMSE(exp(p6),exp(auto_clm$TARGET_AMT_MOD)),
+                AIC=AIC(m6),AICc=AICc(m6),BIC=BIC(m6))
+
+reg <- rbind(m4=m4_out, m4_mod=m4_mod_out,m5=m5_out,m5_mod=m5_mod_out,m6=m6_out)
+rownames(reg) <- c("m4", "m4_mod", "m5", "m5_mod","m6")
+reg            
+```
+
+Based on the table above, model 6 appears to be the superior model.  
+It has superior measures in all categories except for BIC.  
+  
+Let's now do some quick model diagnostics for our selected model, model 6:
+  
+```{r}
+par(mfrow = c(2,2))
+plot(m6)
+
+```
+  
+The residuals in our model appear to have a relatively constant variance across all fitted values.  The qq plot indicates standardized residuals that are fairly well behaved, with only minor departures from normality.  Finally, there are only a couple outliers in our data--none appear to be high leverage points.  
+
+#### Make Predictions  
+  
+Let's wrap up by scrubbing the test data set and make predictions.  Please refer to the Github account in the Appendix to access the prediction file.  
+
+```{r}
+url <- "https://raw.githubusercontent.com/spitakiss/Data621/master/Homework4/insurance-evaluation-data.csv"
+
+auto <- read.csv(url)  
+
+
+currency_fix <- function(x) {
+  num <- str_replace_all(x, "\\$","")
+  num <- as.numeric(str_replace_all(num, "\\,",""))
+  num
+}
+
+auto$INCOME <- currency_fix(auto$INCOME)
+auto$HOME_VAL <- currency_fix(auto$HOME_VAL)
+auto$BLUEBOOK <- currency_fix(auto$BLUEBOOK)
+auto$OLDCLAIM <- currency_fix(auto$OLDCLAIM)
+
+
+auto[sapply(auto, is.factor)] <- lapply(auto[sapply(auto, is.factor)], 
+                                        function(x) str_replace(x,"z_|<",""))
+
+auto[sapply(auto, is.character)] <- lapply(auto[sapply(auto, is.character)],as.factor) 
+
+auto$EDUCATION <- ordered(auto$EDUCATION, levels = c("High School", "Bachelors", "Masters", "PhD") )
+
+auto$INCOME <- auto$INCOME / 1000  
+auto$HOME_VAL <- auto$HOME_VAL / 1000
+auto$BLUEBOOK <- auto$BLUEBOOK / 1000
+auto$OLDCLAIM <- auto$OLDCLAIM / 1000
+
+
+auto$AGE <- ifelse(is.na(auto$AGE), mean(auto$AGE),auto$AGE)
+tmp_data <- mice(auto,maxit=1, method='pmm',seed=20, print=F)
+auto <- complete(tmp_data,1)
+
+auto$TARGET_AMT_MOD <- log(auto$TARGET_AMT)
+auto$KIDSDRIV_MOD <- scale(auto$KIDSDRIV, scale=F)
+auto$HOMEKIDS_MOD <- scale(auto$HOMEKIDS, scale=F)
+auto$CLM_FREQ_MOD <- scale(auto$CLM_FREQ, scale=F)
+auto$AGE_MOD <- scale(auto$AGE, scale=F)
+auto$YOJ_MOD <- scale(auto$YOJ, scale=F)
+auto$TRAVTIME_MOD <- scale(auto$TRAVTIME, scale=F)
+auto$TIF_MOD <- scale(auto$TIF, scale=F)
+auto$INCOME_MOD <- auto$INCOME ^0.5
+auto$HOME_VAL_MOD <- auto$HOME_VAL^0.25
+auto$BLUEBOOK_MOD <- auto$BLUEBOOK^0.5
+auto$OLD_CLAIM_MOD <- log(auto$OLDCLAIM + 1) 
+
+mypred <- predict(m2_mod, auto, type='response')
+auto$TARGET_FLAG <- ifelse(mypred  >= 0.276, 1, 0)
+  
+mypred2 <- exp(predict(m6, auto))  
+auto$TARGET_AMT <- mypred2
+
+write.csv(auto, "evaluation_data_w_predictions.csv")
+
+```  
+  
+## Appendix  
+
+- Link to full code: https://github.com/spitakiss/Data621/tree/master/Homework4/Grzasko_HW4.Rmd   
+- Prediction file: https://github.com/spitakiss/Data621/blob/master/Homework4/evaluation_data_w_predictions.csv   
+
+
+
+
