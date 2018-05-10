@@ -8,9 +8,9 @@ Citric Acid,Citric Acid Content,
 Density,Density of wine,
 FixedAcidity,Fixed acidity of wine,
 FreeSulfurDioxide,Sulfur Dioxide content of wine,
-LabelAppeal,Marketing score indicating appeal of label design.,High value suggests high sales; low or neg. suggests low sales
+LabelAppeal,Marketing score of label attractiviness. ,High value suggests high sales
 ResidualSugar,Resdidual Sugar of wine,
-STARS,Expert Rating: 1=Poor through 4=Excellent,High starts implies high sales
+STARS,Expert Rating: 1=Poor through 4=Excellent,High values implie high sales
 Sulphates,Sulfate content,
 TotalSulfurDioxide,Total Sulfur Dioxide ,
 VolatileAcidity,Volatile acid content of wine,
