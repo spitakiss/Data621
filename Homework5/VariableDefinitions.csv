@@ -1,0 +1,17 @@
+VariableName,Definition,TheoreticalEffect
+INDEX,Identifcation only,
+TARGET,Number of Wine Cases Purchased,
+AcidIndex,Proprietary method of testing total acidity using weighted average,
+Alcohol,Alcohol Content,
+Chlorides,Chloride Content,
+Citric Acid,Citric Acid Content,
+Density,Density of wine,
+FixedAcidity,Fixed acidity of wine,
+FreeSulfurDioxide,Sulfur Dioxide content of wine,
+LabelAppeal,Marketing score indicating appeal of label design.,High number suggest high sales; low or negative number suggests low sales
+ResidualSugar,Resdidual Sugar of wine,
+STARS,Expert Rating: 1=Poor through 4=Excellent,High starts implies high sales
+Sulphates,Sulfate content,
+TotalSulfurDioxide,Total Sulfur Dioxide ,
+VolatileAcidity,Volatile acid content of wine,
+pH,pH of wine,
