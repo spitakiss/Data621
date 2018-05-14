@@ -1,0 +1,837 @@
+---
+title             : "Data 621: Predicting Wine Sales"
+shorttitle        : "Wine Sales"
+
+author: 
+  - name          : "Aaron Grzasko"
+    
+affiliation:
+    institution   : "City University of New York"
+  
+
+abstract: |
+  In this report, we explore the relationship between wine sales and the unique characteristics of wine, including chemical composition, expert ratings, and label attractiveness.  This relationship is examined using a variety of regression models, including Poisson, Negative Binomial, and Multiple Linear regression types.  We conclude the report by listing important drivers of wine sales.   
+
+keywords          : "Wine, Regression, Poisson, Negative Binomial"
+
+bibliography      : ["r-references.bib"]
+
+figsintext        : no
+figurelist        : yes
+tablelist         : yes
+footnotelist      : no
+lineno            : no
+mask              : no
+
+class             : "man"
+output            : papaja::apa6_pdf
+
+---
+
+```{r load_packages, include = FALSE}
+# must have following three packages insalled for rest of code to work
+if (!require(pacman)) install.packages('pacman'); library(pacman)
+if(!"devtools" %in% rownames(installed.packages())) install.packages("devtools")
+if(!"papaja" %in% rownames(installed.packages())) devtools::install_github("crsh/papaja")
+
+p_load(knitr, dplyr, papaja, DataExplorer, moments, ggplot2, ggthemes, tidyr,
+       grid,gridExtra, GGally, mice, car, pscl, stargazer,memisc, MASS, sme)
+```
+  
+
+```{r global_options}
+opts_chunk$set(warning=FALSE, message=FALSE, cache=TRUE)
+
+# custom function for altering code chunk output size
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  x <- def.chunk.hook(x, options)
+  ifelse(options$size != "normalsize", paste0("\\", options$size,"\n\n", x, "\n\n \\normalsize"), x)
+})
+
+```
+
+# Introduction  
+  
+A large wine manufacturer (LWM) is considering revisions to its current lineup of product offerings to improve total sales revenue.  To aid in the decision-making process, LWM acquired a data set that identifies physical characteristics and ratings for more than 12,000 commercial wines.  The data set set also quantifies the number of wine cases purchased by distributors after sampling each product.  
+  
+LWM has contracted with the data analytics team (DAT) to build a model that that predicts the number of wine cases sold to distributors, given a set of unique wine characteristics.
+Because distributor purchases are strongly correlated with sales at restaurants and other retail outlets--where LWM derives the bulk of its revenue--the model output could help LWM determine wine qualities that are associated with strong sales.
+
+# Data Exploration  
+  
+```{r read_data}
+# read in data
+train_url <- 'https://raw.githubusercontent.com/spitakiss/Data621/master/Homework5/wine-training-data.csv'  
+train <- read.csv(train_url)
+names(train)[1] <- "INDEX"
+```  
+  
+## Overview  
+  
+The training data set comprises `r format(nrow(train), big.mark=",")` observations and `r ncol(train)` variables and is approximately `r format(object.size(train), units = "auto", standard = "SI")` in size.  The variable `INDEX` is used for observation identification purposes only.  The other variables include `r ncol(train) -2` features and 1 response variable, `TARGET`.   
+  
+Twelve of the features describe the chemical properties of wine.  The remaining two predictors are rating variables: `LabelAppeal` refers to the perceived attractiveness of a wine's product label, while `STARS` is a subjective assessment of wine quality.  
+  
+Finally, the output variable, `TARGET`, is a count measure indicating the number of wine case purchases by distributors.   
+  
+For a detailed listing of all variable names and descriptions, please refer to Table \ref{tab:vars_defn}, located at the end of this report. Subsequent tables and figures will also provided after the body of this document.  
+  
+```{r vars_defn, results='asis'}
+# print variable descriptions
+var_url <- 'https://raw.githubusercontent.com/spitakiss/Data621/master/Homework5/VariableDefinitions.csv'
+vars <- read.csv(var_url, stringsAsFactors = F) 
+apa_table(vars,caption = "Variable Names and Descriptions in Wine Data Set",small=T,
+          col.names=c("Variable Name","Definition", "Theoretical Effect")) 
+```
+  
+## Categorical Features  
+  
+There are three categorical features in the wine data set: `LabelAppeal`, `STARS`, and `AcidIndex`. The first two of these features are rating variables--see the Overview section and \ref{tab:vars_defn} for detailed descriptions.  `AcidIndex` is related to the acidic quality of wine.  
+
+`LabelAppeal` scores range from -2 through 2.  Based on the data set documentation,  a negative score suggests a poor impression of the label design, a zero score is neutral, and a positive scores implies an attractive design.  The distribution of scores in the training data are symmetrical and roughly bell-shaped.  
+  
+`STARS` scores range from 1 through 4, with experts characterizing more wines as low quality (1-2) than high quality (3-4).  A significant number of wines in the training data--over 25%--have no `STARS` score.  
+  
+`AcidIndex` is a discrete variable with observed values ranging from 4 through 17.  The data documentation describes the calculation of the index value using a proprietary method involving weighted averages.  The values are clearly ordinal, but we have little additional information for understanding the meaning of this variable.  For example, we cannot determine, based on the description provided, whether an index value of 10 reflects a wine with twice the acidic content of another wine with a value of 5.  Unlike the other variables in the unadjusted data set, `AcidIndex` has a moderate, right skew.  
+  
+Refer to Table \ref{tab:cat_stat_tbl} for a numerical summary of each categorical variable. Table \ref{tab:desc_stat} provides additional, descriptive statistics, and Figure \ref{fig:histo} contains graphical summaries.  
+
+```{r cat_stat_tbl, results="asis"}
+# print table of categorical features
+tblFun <- function(x, lab){
+    tbl <- table(x, useNA = "ifany")
+    tbl <- cbind(tbl,prop.table(tbl)*100)
+    tbl <- cbind(tbl, cumsum(tbl[,2]))
+    tbl[,2] <- round(tbl[,2],1)
+    tbl[,3] <- round(tbl[,3],1)
+    colnames(tbl) <- c('Count','Pct', 'Cumul Pct')
+    data.frame(cbind(Variable = lab,Levels=row.names(tbl), tbl), row.names=NULL)
+}
+
+a <- tblFun(train$LabelAppeal, 'LabelAppeal')
+b <- tblFun(train$STARS, 'STARS')
+c <- tblFun(train$AcidIndex, 'AcidIndex')
+tbl <- data.frame(rbind(a,b,c))
+tbl[2:5,1] <- ""
+tbl[7:10,1] <- ""
+tbl[12:24,1] <- ""
+
+options(knitr.kable.NA = '')
+apa_table(tbl,midrules = c(5,10), format.args = list(big.mark=","),
+          small=TRUE, align = c("lrrrr"),
+          caption = "Categorical Features Summary",
+          longtable=TRUE)
+
+```
+  
+## Discrete Features  
+  
+We made a judgment call in classifying `AcidIndex` as a categorical variable--based on the limited information provided in the variable documentation.  The variable is clearly discrete, with only 14 unique values in the training data. Another analyst may reasonably argue that this feature should be treated like a continuous variable for modeling purposes.    
+There are two additional, discrete predictors in the wine data set: `TotalSulfurDioxide` and `FreeSulfurDioxide`.  Both variables measure similar chemical properties. Plots in  Figure \ref{fig:histo} indicate that the variables are symmetric, but have rather fat tails.  We are concerned about the negative values exhibited by these variables: Sulfur Dioxide is typically measured in mg/l (or equivalently, ppm).  We also note that both variables have missing values--see \ref{tab:desc_stat} for more details.  We'll address these issues in subsequent sections.  
+  
+For modeling purposes, we will treat the two sulfur dioxide features like any other continuous predictor.  This treatment seems reasonable, given that both predictors take on a very wide array of discrete values.  
+  
+## Continuous Features  
+  
+Nine predictors in the wine data set are continuous, with each variable corresponding to a particular chemical property: `FixedAcidity`, `VolatileAcidity`, `CitricAcid`, `ResidualSugar`, `Chlorides`, `Density`, `pH`, `Sulphates`, and `Alcohol`.  
+  
+The three predictors related to acidity and the `Density` variable have a significant number of outlier observations--roughly 2% of each feature's observations are classified as outliers.    
+  
+All nine predictors are roughly symmetrical and leptokurtic.  Finally, all continuous features--with the exception of `pH` and `Density`--exhibit negative values.  Based on our cursory research, none of these predictors are measured in units that would include negative values. We will address these issues in a later section.  
+  
+Descriptive statistics and graphical summaries for the continuous features can be found in Table \ref{tab:desc_stat} and Figure \ref{fig:histo}, respectively.  
+
+## Response Variable  
+  
+The output variable `TARGET`, has a zero-inflated distribution, with more than 20% of observations indicating no sales.  Counts in the training data range from 0 through 8, although the values are theoretically unbounded above.  Finally, the distribution of cases sold, given at least one sale, is symmetric and approximately normal.  
+  
+Refer to Table \ref{tab:desc_stat} and Figure \ref{fig:histo} for additional details.  
+  
+
+```{r desc_stat, results='asis'}
+#  function to create descriptive stats
+stats = function (dataframe) {
+  Min = sapply(dataframe, function(x) {min(x, na.rm=TRUE)})
+  Max = sapply(dataframe, function(x) {max(x, na.rm=TRUE)})
+  Range = Max - Min
+  Mean = sapply(dataframe, function(x) {round(mean(x, na.rm=TRUE),3)})
+  Med = sapply(dataframe, function(x) {round(median(x, na.rm=TRUE),3)})
+  Stdev = sapply(dataframe, function(x) {round(sd(x, na.rm=TRUE),3)})
+  Skew = sapply(dataframe, function(x) {round(skewness(x, na.rm=TRUE),3)})
+  Kurt = sapply(dataframe, function(x) {round(kurtosis(x, na.rm=TRUE),3)})
+  NAs = sapply(dataframe, function(x) {round(sum(length(which(is.na(x)))),3)})
+  Outliers = sapply(dataframe, function(x) {
+    round(length(which(x>mean(x)+ 3*sd(x) | x<mean(x)- 3*sd(x))),3)
+    })
+    return(cbind(Min, Max, Range, Mean, Med, Stdev, Skew, Kurt, NAs, Outliers))
+}
+# print table of stats
+stats_df <- data.frame(stats(train[,2:ncol(train)]))
+apa_table(stats_df,small=T,
+          caption= "Descriptive Statistics Summary",
+          format.args = list(digits = c(rep(1,8),rep(0,2)), margin = 2),
+          align = rep("r",10),
+          note="Outliers are defined as observations
+          that are more than 3 standard deviations from the mean",
+          placement="tbp")
+
+
+```
+
+(ref:hist-caption)
+Histogram of Wine Training Data Variables
+
+```{r histo, fig.cap = "(ref:hist-caption)"}
+# plot histograms of training data variables
+mylevels <- names(train[,2:16])
+hplot <- train %>%
+  select(-INDEX) %>% 
+  gather() %>% 
+  mutate(facet = factor(key, levels=mylevels)) %>% 
+  ggplot(aes(value)) +  
+  facet_wrap(~ facet, scales = "free") + 
+  geom_histogram()  + theme_pander()  + 
+  theme(axis.text.y = element_text(size=7),
+        strip.text.x = element_text(size= 9),
+        axis.text.x = element_text(size=6),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.title.y = element_text(size=8)) + 
+  labs(x=NULL, title="Wine Data Histograms")
+hplot
+```
+  
+## Relationship Between Features and Response   
+  
+In Figure \ref{fig:bp} we compare the three categorical variables to the `TARGET` variable. For each of these predictors, there appears to be a significant relationship between the ordered levels and the number of wine cases sold.  Unit increases to the `LabelAppeal` metric are associated with consistent increases in the response.  Similarly, increases in the `STARS` rating correspond with higher wine sales.  Interestingly enough, wines that have not been rated tend to have low sales compared to their rated counterparts.  Finally, `AcidIndex` score appear to be negatively correlated with the response.  
+  
+The relationship between the `TARGET` variable and the continuous variables is less clear. We initially created scatterplots to explore these relationship.  Unfortunately, there is significant variability in response values across narrow bands of similar predictor values; so patterns are not easily discerned.  As an alternative we plotted Loess curves to get a general sense of the relationship between the  predictors and the response--see Figure \ref{fig:lc}.  The plotted curves are fairly complex but we noted several mild or moderate patterns:  
+
+* Higher Alcohol content is associated with higher sales.  
+* The concentration of Chlorides appears to be negatively associated with sales.
+* Higher acidity tends to be associated with lower sales.  
+* Sulfur Dioxide concentration appears to have a positive association with sales.  
+
+(ref:bp-caption)
+Boxplots of TARGET vs. Categorical Variables
+  
+```{r bp,fig.cap='(ref:bp-caption)', fig.width=7, fig.height=7}
+# convert categorical features to factors
+train$LabelAppeal <- ordered(train$LabelAppeal, levels = c(-2,-1,0,1,2))
+train$STARS <- ordered(train$STARS, levels = c(1,2,3,4))
+train$AcidIndex <- ordered(train$AcidIndex, levels = seq(4,17))
+
+# print boxplots for categorical variables
+bp1 <- ggplot(train, aes(LabelAppeal,TARGET)) + geom_boxplot() + theme_apa() + 
+  theme(axis.title = element_text(size=10), 
+        plot.title = element_text(hjust= 0.5, size = 12)) +
+  labs(title = 'TARGET vs LabelAppeal')
+  
+bp2 <- ggplot(train, aes(STARS,TARGET)) + geom_boxplot() + theme_apa() +
+  theme(axis.title = element_text(size=10), 
+        plot.title = element_text(hjust= 0.5, size = 12)) +
+  labs(title = 'TARGET vs STARS')  
+
+bp3 <- ggplot(train, aes(AcidIndex,TARGET)) + geom_boxplot() + theme_apa() + 
+  theme(axis.title = element_text(size=10), 
+        plot.title = element_text(hjust= 0.5, size = 12)) +
+  labs(title = 'TARGET vs AcidIndex')  
+  
+grid.arrange(bp1, bp2, bp3, ncol = 1,
+             top = textGrob("Boxplots of Categorical Pedictors",
+                            gp=gpar(fontsize=15)))
+
+
+
+```
+  
+(ref:lc-caption)
+Loess Curves of TARGET vs. Continuous Variables  
+  
+```{r lc, fig.cap="(ref:lc-caption)"}
+lcplot <- train %>%
+  select(-LabelAppeal, -STARS, -INDEX, -AcidIndex) %>% 
+  gather(key="key", value="value",-TARGET) %>% 
+  ggplot(aes(value, TARGET)) +  
+  facet_wrap(~ key, scales = "free") + 
+  theme_pander()  + 
+  theme(axis.text.y = element_text(size=7),
+        strip.text.x = element_text(size= 9),
+        axis.text.x = element_text(size=6),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.title.y = element_text(size=8)) + 
+  labs(x=NULL, title="Loess Curves of TARGET vs. Continuous Predictors") +
+  geom_smooth(method="loess", color="black")
+
+lcplot
+
+```  
+  
+## Correlation Between Variables  
+  
+In Figure \ref{fig:cor}, we produced a correlation matrix of all candidate variables. For computational purposes, we converted all categorical variables back to their original numerical form.   
+  
+None of the predictors have a particularly strong correlation with the `TARGET` variable.  The `STARS` predictor has a moderate positive association with response.  `LabelAppeal` has a moderately weak positive correlation with `TARGET`, while `AcidIndex` has a fairly weak negative association with the response.  All other predictors have extremely weak linear associations with `TARGET`.    
+  
+Finally, the correlations between predictor variables are all weak.  In other words, there there are no immediately obvious collinearity issues.   
+  
+(ref:cor-caption)
+Correlation of Wine Data Variables
+  
+```{r cor, fig.width=7, fig.height=7, fig.cap="(ref:cor-caption)"}
+# convert categorical variables back to integers; used for correlation purposes only
+train$LabelAppeal <- as.integer(as.character(train$LabelAppeal))
+train$STARS <- as.integer(as.character(train$STARS))
+train$AcidIndex <- as.integer(as.character(train$AcidIndex))
+
+ggcorr(train[,2:16], method=c("pairwise","pearson"), label=T,
+       label_round = 2, size=2.9, hjust=0.65, label_size=3, geom="text") + 
+  geom_point(size = 10, color="grey",aes(alpha = abs(coefficient) > 0.5)) + 
+  scale_alpha_manual(values = c("TRUE" = 0.25, "FALSE" = 0)) + 
+  guides(color = FALSE, alpha = FALSE) + labs(title = "Correlation Plot") + 
+  theme(plot.title = element_text(hjust=0.5))
+  
+```
+  
+# Data Preparation  
+  
+## Negative Values  
+  
+As discussed previously, none of the predictors related to chemical composition should have negative values, as the units of measurement for these variables are always non-negative.  
+  
+Based on the descriptive statistics and histogram plots in Figure \ref{fig:histo} and Table \ref{tab:desc_stat}, respectively, we see a similarity in the magnitudes of the negative and positive ranges for each of thee predictors of concern.  In other words, the distributions are all symmetric.    
+  
+It is possible that the minus signs in the data reflect data entry errors or some other identifying characteristic, but we have no data documentation to support these hypotheses.  On the other hand, we found a resource online--see the References section--that analyzes the distributions of various wine chemical properties.  In that resource, most of the wine distributions featured all positive values distributions and were mostly right skewed.  
+  
+Based on this information, we decided to apply simple absolute value transformation for the predictors of concern.  In total, we applied this transformation to nine predictors: `FixedAcidity`, `VolatileACidity`, `CitricAcid`, `ResidualSugar`, `Chlorides`, `FreeSulfurDioxide`, `TotalSulfurDioxide`, `Sulphate`, and `Alcohol`.  
+
+```{r}
+# absolute value transformations to predictors with negative vals
+train$FixedAcidity <- abs(train$FixedAcidity)
+train$VolatileAcidity <- abs(train$VolatileAcidity) 
+train$CitricAcid <- abs(train$CitricAcid)
+train$ResidualSugar <- abs(train$ResidualSugar)
+train$Chlorides <- abs(train$Chlorides) 
+train$FreeSulfurDioxide <- abs(train$FreeSulfurDioxide)
+train$TotalSulfurDioxide <- abs(train$TotalSulfurDioxide)
+train$Sulphates <- abs(train$Sulphates)
+train$Alcohol <- abs(train$Alcohol)
+
+```
+  
+## Missing Values  
+  
+Missing values impact roughly 50% of records in the training data.  The values are present in varying degrees across eight of the predictor candidates: `STARS`, `Sulphates`, `TotalSulfurDioxide`, `Alcohol`, `FreeSulfurDioxide`, `Chlorides`, `ResidualSugar`, and `pH`.  For a summary description of missing elements, refer to Figure \ref{fig:missing}.  
+  
+The `STARS` variable has the highest number of missing values, with roughly one quarter of observations coded as NA.  Given the large number of missing records, and the apparent significance of the NA records relationship with `TARGET` vis-a-vis the other variable levels, we decided to leave the NA records as is.  
+  
+The `Sulphates` variable has missing values in approximately 10% of observations, while the six other predictors have missing values in the 3% - 5% range.  Given the relatively small percentages of missing values for the remaining predictors, we will impute values using R's `MICE` package.  The use of the `MICE` procedure results in less bias in model regression coefficients compared to simpler methods like mean substitution.  
+  
+Refer to Figure \ref{fig:miceproc} for a graphical depiction of the `MICE` imputation procedure.  The blue curves represent the distribution of non-missing values, while the red curves are the imputed values. The red and blue distributions are very similar.  This result suggests that the imputation procedure approximated the original distribution accurately.   
+  
+\makeatletter
+\setlength{\@fptop}{0pt}
+\makeatother  
+
+(ref:missing-caption)
+Plot of Missing Observations in Wine Training Data  
+
+```{r missing, fig.cap="(ref:missing-caption)", fig.width=5, fig.height=5, fig.align='center'}
+# plot missing 
+missing_ct <- data.frame(variable=row.names(stats_df), NAs=stats_df$NAs,
+                         Pct=round(stats_df$NAs/nrow(train)*100,1))
+miss_plot <- ggplot(missing_ct, aes(reorder(variable,NAs), NAs)) +
+  geom_col() + coord_flip() + theme_pander() + 
+  geom_text(aes(y = NAs, label=paste0(Pct,"%")), hjust=-0.3, size=3) +
+  ylim(c(0,3700)) + labs(x="variable",y="missing value count") + 
+  labs(title="Missing Values in Wine Data") + 
+  theme(plot.title = element_text(hjust = 0.5, size=12))
+  
+miss_plot
+```  
+  
+(ref:mice-caption)
+Graphical Summary of MICE Imputation Procedure  
+  
+```{r miceproc, fig.cap="(ref:mice-caption)"}
+# convert STARS back to factor
+train$STARS <- ifelse(is.na(train$STARS),"NA",train$STARS)
+train$STARS <- ordered(train$STARS, levels = c("NA","1","2","3","4"))
+
+# fix missing values with mice
+tmp_data <- mice(train,maxit=3, method='pmm',seed=20, print=F)
+train <- complete(tmp_data,1)
+
+# plot mice
+densityplot(tmp_data)
+
+```
+
+## Revised Descriptive Statistics and Graphical Summaries  
+  
+We have made substantial revisions to our predictor variables; so we will review the revised variables based on the transformations applied thus far.  
+  
+In Table \ref{tab:desc_statrev}, we recalculated basic descriptive statistics for all variables. We also generated new histograms, correlation plots, and loess curve plots--see Figures \ref{fig:historevised}, \ref{fig:correv}, and \ref{fig:lcrev}, respectively.  
+  
+We see that many of the predictor variables now have a moderate right skew. The majority of the predictors are still leptokurtic. Also, our transformed variables indicate a higher prevalence of outlier observations. The revised Loess curve plots indicate some significant changes in the relationship between the predictors and the `TARGET` variable.  For instance, sulfur dioxide content now seems to be negatively correlated with wine sales.  Interestingly, the loess curves are almost linear or slightly curved for typical predictor values.  However, the curves are very complex and unstable for predictor values that are are sparsely populated.  Finally, the revised correlation plot indicates no material changes to the original correlations.  
+  
+
+```{r desc_statrev, results='asis'}  
+# print table of revised desc stats - post fixing negative values and missing
+train$STARS <- as.integer(as.character(train$STARS))
+stats_df <- data.frame(stats(train[,2:ncol(train)]))
+apa_table(stats_df,small=T,
+          caption= "Revised Descriptive Statistics Summary",
+          format.args = list(digits = c(rep(1,8),rep(0,2)), margin = 2),
+          align = rep("r",10),
+          note="Outliers are defined as observations
+          that are more than 3 standard deviations from the mean",
+          placement="tbp")
+
+```  
+  
+  
+(ref:revhisto) 
+Revised Histogram of Wine Training Data Variables  
+  
+```{r historevised, fig.cap="(ref:revhisto)"}  
+# plot histograms of revised training dat
+mylevels <- names(train[,2:16])
+hplot <- train %>%
+  select(-INDEX) %>% 
+  gather() %>% 
+  mutate(facet = factor(key, levels=mylevels)) %>% 
+  ggplot(aes(value)) +  
+  facet_wrap(~ facet, scales = "free") + 
+  geom_histogram()  + theme_pander()  + 
+  theme(axis.text.y = element_text(size=7),
+        strip.text.x = element_text(size= 9),
+        axis.text.x = element_text(size=6),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.title.y = element_text(size=8)) + 
+  labs(x=NULL, title="Revised Wine Data Histograms")
+hplot
+```
+  
+  
+(ref:cor-caption-rev)
+Revised Correlation of Wine Data Variables  
+  
+```{r correv, fig.width=7, fig.height=7, fig.cap="(ref:cor-caption-rev)"}
+# revised correlation plots
+ggcorr(train[,2:16], method=c("pairwise","pearson"), label=T,
+       label_round = 2, size=2.9, hjust=0.65, label_size=3, geom="text") + 
+  geom_point(size = 10, color="grey",aes(alpha = abs(coefficient) > 0.5)) + 
+  scale_alpha_manual(values = c("TRUE" = 0.25, "FALSE" = 0)) + 
+  guides(color = FALSE, alpha = FALSE) + labs(title = "Revised Correlation Plot") + 
+  theme(plot.title = element_text(hjust=0.5))
+  
+```
+  
+(ref:lccaprev)
+Revised Loess Curves of TARGET vs. Continuous Variables  
+  
+```{r lcrev, fig.cap="(ref:lccaprev)"}
+lcplot <- train %>%
+  select(-LabelAppeal, -STARS, -INDEX, -AcidIndex) %>% 
+  gather(key="key", value="value",-TARGET) %>% 
+  ggplot(aes(value, TARGET)) +  
+  facet_wrap(~ key, scales = "free") + 
+  theme_pander()  + 
+  theme(axis.text.y = element_text(size=7),
+        strip.text.x = element_text(size= 9),
+        axis.text.x = element_text(size=6),
+        plot.title = element_text(hjust = 0.5, size=10),
+        axis.title.y = element_text(size=8)) + 
+  labs(x=NULL, title="Revised Loess Curves of TARGET vs. Continuous Predictors") +
+  geom_smooth(method="loess", color="black")
+
+lcplot
+
+```  
+  
+## Bin Acid Index Predictor
+  
+We previously decided to treat `AcidIndex` as an ordered, categorical variable.  Because the index values are sparsely populated at the extreme low and high ends, we will bin the categories into fewer groupings.  Specifically, we will merge values of 4 and 5 into the 6 index measure.  We will also merge indices 11 and higher into the original 10 index value. This decision is also supported by the boxplot in Figure \ref{fig:bp}, where extreme low and high index values appear to have similar relationship with the `TARGET` variable.  
+  
+```{r}
+# bin transformation to AcidIndex
+train$AcidIndex <- ifelse(train$AcidIndex < 6,6,
+                          ifelse(train$AcidIndex > 10,
+                                 10,train$AcidIndex))
+
+train$AcidIndex <- ordered(train$AcidIndex, levels = seq(6,10))
+
+# convert other categories back to factors
+train$STARS <- ifelse(is.na(train$STARS),"NA",train$STARS)
+train$STARS <- ordered(train$STARS, levels = c("NA","1","2","3","4"))
+train$LabelAppeal <- ordered(train$LabelAppeal, levels = c(-2,-1,0,1,2))
+```
+  
+## Other Transformations Considered  
+  
+We contemplated applying Box-Cox suggested power transformations to some of the predictor variables. Because many of the predictor values have a moderate right skew, we could reasonably apply log, square root, and/or quarter-root transformations.  These transformations may make sense in a basic OLS model; however, we are building a variety of glm models in addition to OLS models.  Most glms do not require such transformations. We ultimately decided to refrain from applying any power transformations at this point in the modeling process.
+
+We also debated whether or not to winsorize some of the candidate predictors, given the prevalence of outlier observations.  While this procedure can soften the influence of outlier observations, it can also introduce bias in the point estimates and inference mechanisms.  We therefore decided to forgo winsorizing the predictors.  
+  
+Finally, we noted that our client, LWM, requires an interpretable model.  By refraining from applying complex predictor transformations, our model should remain relatively easy to explain. 
+
+# Build Models  
+  
+## Multiple Linear Regression Model 1  
+  
+For our first linear regression model, we decided to include the following four predictors: `AcidIndex`, `STARS`, `LabelAppeal`, and `Alcohol`.  We included each of the categorical predictors because of their clear relationship with `TARGET`--see the boxplots in Figure \ref{fig:bp}.  Also the correlation plot (Figure \ref{fig:correv}) indicated higher magnitude correlation values compared to the other candidate predictors.  
+  
+We included the `Alcohol` variable for a variety of reasons.  First, we recognize that our variable transformation involving the absolute value may not have been the best approach to handling negative values.  Fortunately, the raw `Alcohol` values were all positive.  Secondly, this variable is also not significantly skewed and has only mildly fat tails.  We also observe fewer outliers with this variable compared to many other predictors.  Finally, `Alochol's` relationship with `TARGET`--refer to Figure \ref{fig:lcrev}--appears to be more straightforward compared to other relationships.  
+  
+See Table \ref{tab:mod1} for regression output.  The model has an adjusted $R^2$ value of 0.54.  All predictors and levels within each categorical predictor are significant at the 5% level.  The model coefficients make intuitive sense.  Sales of wine decrease with each increase in the `AcidIndex` value.  Having a `STARS` rating results in more sales compared to no ratings, and higher `STARS` ratings are associated with higher sales.  Finally, increases in alcohol content are associated with higher sales.  This is consistent with observations from our EDA work.      
+
+```{r mod1, results='asis'}
+# model 1; linear model
+train$LabelAppeal <- factor(train$LabelAppeal, ordered=F)
+train$STARS <- factor(train$STARS, ordered=F)
+train$AcidIndex <- factor(train$AcidIndex, ordered=F)
+
+mod1 <- lm(TARGET ~ AcidIndex + STARS + LabelAppeal + Alcohol, data=train)
+apa.mod1 <- apa_print(mod1)
+apa_table(apa.mod1$table, caption="Model 1 Multiple Regression Output")
+```
+  
+## Multiple Linear Regression Model 2  
+  
+For our second multiple linear regression model, we we used stepwise regression with variable selection occurring in both directions.  Model output can be found in Table \ref{tab:mod2}.  This second model has an adjusted $R^2$ of 0.54, and has 11 out of the 15 potential candidate predictors.  Only `FixedAcidity`, `ResidualSugar`, and `FreeSulfureDioxide` excluded from the model.  
+
+```{r mod2, results='asis'}  
+# model 2: multiple linear regression
+model.upper <- lm(TARGET ~ ., data=train)
+model.null <- lm(TARGET ~ 1, data=train)
+mod2 <- step(model.null,scope=list(upper=model.upper, lower=model.null),
+           trace= 0, direction='both')
+apa.mod2 <- apa_print(mod2)
+apa_table(apa.mod2$table, caption="Model 2 Multiple Regression Output")
+
+```
+ 
+Three predictors have p-values over 5%: `pH`, `CitricAcid`, and `Sulphates`.  Let's create a reduced model that removes these variables--see Table \ref{tab:modtwoone} for regression output for this smaller model. The adjusted $R^2$ is still 0.54, but now all model p-values are below 5%.  
+  
+```{r modtwoone, results = 'asis'}
+mod2.1 <- update(mod2, . ~ . -pH -CitricAcid -Sulphates)
+apa.mod2.1 <- apa_print(mod2.1)
+apa_table(apa.mod2.1$table, caption="Model 2.1 Multiple Regression Output")
+```
+  
+Let's perform an ANOVA test to see if the full model is significantly different than the reduced model--refer to Table \ref{tab:anv}.  
+
+```{r anv, results= 'asis'}
+# anova
+anovtab1 <- anova(mod2.1, mod2)
+apa_table(data.frame(anovtab1), caption= "ANOVA of Model 2 and Model 2.1")
+```
+  
+The p-value of the ANOVA test is greater than 5%,  We proceed with the reduced Model 2.1.  
+  
+All coefficients included in Model 2 that were also in Model 1 have similar signs and magnitudes as those in the prior model.  Furthermore, the signs of the four additional predictors are consistent with results from our EDA.  For instance, we expected the number of wine cases sold to decrease with increases in `VolatileAcidity`.  We also expected some improvement in `TARGET` output with increases to `TotalSulfurDioxide`.  Finally, our EDA--see Figure \ref{fig:lcrev}--indicated a general decrease in `TARGET` values with increases with `Chloride` and `Density`.  This is consistent with the negative model coefficients ovserved in Model 2.1.       
+  
+## Poission Regression Model 3  
+  
+A Poisson model is potentially more appropriate for our modeling problem because our output variable is count-based measure.  
+  
+In a Poisson-based model, we assume the dependent variable's mean is identical to its variance.  Let's briefly check this assumption by comparing the unconditional mean and variance of `TARGET` variable.  The variable's mean is `r round(mean(train$TARGET),2)` and the variance is `r round(var(train$TARGET),2)`.  Because the variance is somewhat higher than the mean, there could possibly be an issue with overdispersion.  
+  
+Let's start by building a Poisson glm using the same variables from Model 1.  Model output is provided in Table \ref{tab:mod3}.  The AIC value is 45604.  All coefficients are statistically significant, with signs in and magnitudes that are consistent with our understanding of the the predictor relationship with `TARGET`.  
+  
+
+```{r mod3, results='asis'}
+mod3 <- glm(TARGET ~ AcidIndex + STARS + LabelAppeal + Alcohol,
+            data=train, family="poisson")
+apa.mod3 <- apa_print(mod3)
+apa_table(apa.mod3$table, caption="Model 3 Poisson Regression Output")
+
+```
+  
+## Poisson Regression Model 4  
+  
+We will now fit a Poisson Regression model using stepwise regression.  Model output can be found in Table \ref{tab:mod4}.  The coefficients in this model are identical to those in our reduced Model 2 (i.e. Model 2.1).  The coefficient signs and magnitudes are consistent with our understanding from our earlier EDA work.  However, we note that three variables in this variable have p-values above 5%: `TotalSulfurDioxide`, `Chlorides`, and `Density`.     
+```{r mod4, results='asis'}
+model.upper <- glm(TARGET ~ ., data=train, family="poisson")
+model.null <- glm(TARGET ~ 1, data=train, family="poisson")    
+mod4 <- step(model.null,scope=list(upper=model.upper, lower=model.null),
+           trace= 0, direction='both')
+
+apa.mod4 <- apa_print(mod4)
+apa_table(apa.mod4$table, caption="Model 4 Poisson Regression Output")
+```  
+  
+We'll build a reduced model with these three variables removed.  Output can be found in Table \ref{tab:modfourone}.  
+  
+```{r modfourone, results='asis'}
+mod4.1 <- update(mod4, . ~ . - Density - Chlorides -TotalSulfurDioxide)
+apa.mod41 <- apa_print(mod4.1)
+apa_table(apa.mod41$table, caption="Model 4.1 Poisson Regression Output")
+```
+   
+We'll now perform an analysis of deviance test to compare the full and reduced models-see Table \ref{tab:anvtwo}.  The p-value for this test roughly 3%, so we will proceed with the full model.  
+  
+```{r anvtwo, results='asis'}
+# anova model 4: full and reduced
+anovtab2 <- anova(mod4.1, mod4, test="Chisq")
+apa_table(data.frame(anovtab2), caption= "Analysis of Deviance of Models 4 and Model 4.1")
+```
+  
+## Zero-Inflated Poisson Regression Model 5  
+  
+We noted earlier that the `TARGET` variable is zero-inflated.  Therefore, it makes sense to attempt to fit a zero-inflated Poisson regression model.  
+  
+We'll use the same set of predictors from Model 2.1 and 4.  Model output is located in Table 13. 
+```{r modfive, results='asis'}
+mod5 <- zeroinfl(TARGET ~ AcidIndex + STARS + LabelAppeal + Alcohol +
+                   VolatileAcidity + TotalSulfurDioxide + Chlorides + Density,
+                 data=train, dist="poisson")
+
+t <- summary(mod5)[1]
+
+stargazer(t, title="Model 5 Zero Inflated Poisson Regression Output",
+          header=FALSE)
+
+```
+  
+While the coefficients and signs of our variables are consistent with our understanding of these variables, we see four variables in the Poisson with log link component of the model with p-values greater than 5%.    
+  
+## Zero-Inflated Poisson Regression Model 6  
+  
+Model 6 simply removes the insignificant predictors from model 5.  Output can be found in Table 15.  
+
+```{r mod6, results='asis'}
+mod6 <- update(mod5, . ~ . - Chlorides - Density - TotalSulfurDioxide - Density)
+t <- summary(mod6)[1]
+stargazer(t, title="Model 6 Zero Inflated Poisson Regression Output", 
+          header=FALSE)
+
+```
+  
+All coefficients in the resulting model--with the exception of one dummy variable relating to `AcidIndex`--are significant.  
+  
+## Negative Binomial Model 7  
+  
+In model 7,  we build a negative binomial regression model.  This model type seems appropriate given that the data is possibly overdispersed.  
+  
+We'll begin by using the small subset of predictors using in Model 1.  Output is located in Table 17.  
+  
+```{r} modseven, results='asis', message=FALSE}
+mod7 <- glm.nb(TARGET ~ AcidIndex + STARS + LabelAppeal + Alcohol, data=train)
+t <- summary(mod7)
+stargazer(t$coefficients, title="Model 7 Negative Binomial Regression Output",
+          header=FALSE)
+
+```
+  
+All coefficients are significant.  The values of the coefficients are consistent with previous models examined.  
+
+## Negative Binomial Model 8  
+  
+In the next model, we fit a negative binomial model using stepwise regression.  Model output is in Table 18.  All categorical predictors are included in the final model, as well as `VolatileAcidity`, `Alcohol`, `TotalSulfurDioxide`, `Chlorides`. and `Density`.  Of these predictors, `TotalSulfurDioxide`, `Chlorides`. and `Density` are not significant at the 5% threshold.  
+
+```{r mod8, results='asis'}
+model.upper <- glm.nb(TARGET ~ ., data=train)
+model.null <- glm.nb(TARGET ~ 1, data=train)    
+mod8 <- step(model.null,scope=list(upper=model.upper, lower=model.null),
+           trace= 0, direction='both')
+
+t <- summary(mod8)
+stargazer(t$coefficients, title="Model 8 Negative Binomial Regression Output",
+          header=FALSE)
+```  
+  
+We'll produce a reduced model with the three predictors removed.  Output can be found in Table 19.  
+  
+```{r modeightone, results='asis'}
+mod8.1 <- update(mod8, . ~ . -TotalSulfurDioxide - Chlorides -Density)  
+t <- summary(mod8.1)
+stargazer(t$coefficients, title = "Model 8.1 Negative Binomial Regression Output",
+          header=FALSE)
+```
+  
+Now we'll do an analysis of deviance test to compare the full and reduced models--see Table 20 for details.  
+  
+```{r anveight, results='asis', fig.height=3, fig.width=3}
+anovtab3 <- anova(mod8.1, mod8, test="Chisq")
+apa_table(data.frame(anovtab3[,2:8]), caption= "Analysis of Deviance of Models 8 and Model 8.1", small=T)
+```
+  
+We proceed the full model, given the p-value of 3%.  
+  
+
+## Zero Inflated Negative Binomial Model 9  
+  
+Next, we build a zero-inflated negative binomial model.  We'll start with the set of candidate predictors used in model 8--refer to Table 21 for detailed output.  
+  
+All variables are significant except `VolatileAcidity`, `TotalSulfurDioxed`, `Chlorides`, and `Density`.  
+
+```{r mod9, results='asis'}
+mod9 <- zeroinfl(TARGET ~ AcidIndex + STARS + LabelAppeal + Alcohol +
+                   VolatileAcidity + TotalSulfurDioxide + Chlorides + Density,
+                 data=train, dist="negbin")
+t <- summary(mod9)[1]
+stargazer(t, title="Model 9 Zero Inflated Negative Binomial Regression Output",
+          header=FALSE)
+
+```
+  
+## Zero-inflated Negative Binomial Model 10  
+ 
+For our last model, we'll start with Model 9, but remove the predictors that were not statistically significant.  Full model output is in Table 23.  
+
+```{r mod10, results='asis'}
+mod10 <- update(mod9, . ~ . -VolatileAcidity - TotalSulfurDioxide -Chlorides - Density)
+
+t <- summary(mod10)[1]
+stargazer(t, title="Model 10 Zero Inflated Negative Binomial Regression Output",
+          header=FALSE)
+
+```  
+  
+All predictors are statistically significant in this model.  
+  
+# Select Models  
+  
+## Model Evaluations  
+
+We have 10 models in total to compare.  We need a common set of statistics that we can use to compare each model.  We are able to calculate BIC for 6 out of the 10 models, and AIC for all 10 models.  Refer to Table 25 for a full model comparison summary.  
+  
+```{r comp, results='asis'}
+mod1_out <- cbind(AIC=AIC(mod1), BIC = BIC(mod1), loglik=logLik(mod1))
+mod2.1_out <- cbind(AIC=AIC(mod2.1),BIC = BIC(mod2.1), loglik=logLik(mod2.1))
+mod3_out <- cbind(AIC=AIC(mod3),BIC = BIC(mod3), loglik=logLik(mod3))
+mod4_out <- cbind(AIC=AIC(mod4), BIC = BIC(mod4), loglik=logLik(mod4))
+mod5_out <- cbind(AIC=AIC(mod5), BIC = BIC(mod5), loglik=logLik(mod5))
+mod6_out <- cbind(AIC=AIC(mod6), BIC = BIC(mod6), loglik=logLik(mod6))
+mod7_out <- cbind(AIC=AIC(mod7), BIC = BIC(mod7), loglik=logLik(mod7))
+mod8_out <- cbind(AIC=AIC(mod8), BIC = BIC(mod8), loglik=logLik(mod8))
+mod9_out <- cbind(AIC=AIC(mod9), BIC = BIC(mod9), loglik=logLik(mod9))
+mod10_out <- cbind(AIC=AIC(mod10), BIC = BIC(mod10), loglik=logLik(mod10))
+
+model_comp <- rbind(mod1_out, mod2.1_out,mod3_out,mod4_out,
+                          mod5_out,mod6_out,mod7_out,mod8_out,
+                          mod9_out, mod10_out)
+  
+  
+rownames(model_comp) <- c("mod1_out","mod2.1_out","mod3_out","mod4_out",
+                          "mod5_out","mod6_out","mod7_out","mod8_out",
+                          "mod9_out", "mod10_out")
+
+
+apa_table(model_comp, caption="Compare Models")
+```
+
+Using AIC, we see that the multiple linear regression models (Model 1 and 2.1) outperform the basic Poisson (Models 3 and 4) and Negative Binomial Models (Models 7 and 8).  
+This result is somewhat surprising, as we suspected that the negative binomial models would be superior to the other model types.  Interestingly, the basic Poisson and Negative Binomial performed about the same.   
+  
+On the other hand, the zero inflated Poisson (Models 5 and 6) and Zero inflated Negative Binomial models performed the best.  The models where we included in the statistically insignificant predictors (Models 5 and 9) performed the best.  
+  
+While Models 5 and 9 have virtually identical AIC measures, we select Model 9, the zero inflated Negative Binomial model, as our model to use going forward, due to possible overdispersion issues with the data.  
+  
+## Make Predictions  
+  
+We applied the same imputation and transformation procedures used for the training data on our evaluation data set.  
+  
+Next, we predicted `TARGET` values using Model 9, one of our zero-inflated Negative Binomial models.  
+  
+Finally we uploaded the prediction file to Github:  
+https://raw.githubusercontent.com/spitakiss/Data621/master/Homework5/test_data_with_predictions.csv
+  
+```{r test}
+# read in test data
+test_url <- 'https://raw.githubusercontent.com/spitakiss/Data621/master/Homework5/wine-evaluation-data.csv'  
+test <- read.csv(test_url)
+names(test)[1] <- "INDEX"  
+
+# absolute value transformations to test predictors with negative vals
+test$FixedAcidity <- abs(test$FixedAcidity)
+test$VolatileAcidity <- abs(test$VolatileAcidity) 
+test$CitricAcid <- abs(test$CitricAcid)
+test$ResidualSugar <- abs(test$ResidualSugar)
+test$Chlorides <- abs(test$Chlorides) 
+test$FreeSulfurDioxide <- abs(test$FreeSulfurDioxide)
+test$TotalSulfurDioxide <- abs(test$TotalSulfurDioxide)
+test$Sulphates <- abs(test$Sulphates)
+test$Alcohol <- abs(test$Alcohol)
+
+test$STARS <- ifelse(is.na(test$STARS),"NA",test$STARS)
+test$STARS <- ordered(test$STARS, levels = c("NA","1","2","3","4"))
+
+# fix missing values with mice
+tmp_data <- mice(test,maxit=3, method='pmm',seed=20, print=F)
+test <- complete(tmp_data,1)
+
+# bin transformation to AcidIndex
+test$AcidIndex <- ifelse(test$AcidIndex < 6,6,
+                          ifelse(test$AcidIndex > 10,
+                                 10,test$AcidIndex))
+
+test$AcidIndex <- ordered(test$AcidIndex, levels = seq(6,10))
+
+# convert other categories back to factors
+test$LabelAppeal <- ordered(test$LabelAppeal, levels = c(-2,-1,0,1,2))
+test$LabelAppeal <- factor(test$LabelAppeal, ordered=F)
+test$STARS <- factor(test$STARS, ordered=F)
+test$AcidIndex <- factor(test$AcidIndex, ordered=F)
+
+mypreds <- predict(mod9,test)
+
+test$TARGET <- mypreds
+
+#write.csv(test, "test_data_with_predictions.csv")
+```
+  
+## Compare Training TARGET and Predicted Values  
+  
+As a final check, we'll compare the distributions of the training data `TARGET` variable and the predicted response values in the test data set--refer to Table \ref{tab:compt} for the summary table.  
+  
+```{r compt, results='asis'}
+# compare disitributions of training target and predicted test target
+fnlcmp <- rbind(stats(data.frame(train$TARGET)), stats(data.frame(test$TARGET)))
+apa_table(fnlcmp, caption="Compare Training and Test TARGET Variable")
+```
+
+The distributions are fairly similar.  The means and medians are almost identical, and the kurtosis values are close.  The standard deviation and range of the predicted `TARGET` values are slightly lower than the comparable statistics in the training data.  
+  
+# Conclusion  
+  
+We produced an interpretable model that LWM can use for potentially modifying its current wine offerings.    
+  
+Based on our modeling process, we've determined that high expert ratings and attractive label design are very important factors that are routinely associated with high wine sales.  Wines that are less acidic tend to sell better, and higher alcohol content is associated above average sales.  
+  
+Additional attributes that are common in high-selling wines include low concentrations of volatile acidic content, chlorides, and total sulfur dioxide.  Finally, low density wines tend to sell better than high density wines.  
+
+
+
+\newpage
+
+# References  
+  
+We used `r cite_r("r-references.bib")` for all our analyses.
+```{r create_r-references}
+r_refs(file = "r-references.bib")
+```
+
+\begingroup
+\setlength{\parindent}{-0.5in}
+\setlength{\leftskip}{0.5in}
+  
+
+<div id = "refs"></div>  
+Red Wine Analysis: https://rpubs.com/billa/redwine
+\endgroup  
+  
+\newpage  
+  
+\appendix  
+  
+\section{*} \label{App:AppendixA}
+
+Below are the scripts used to produce this paper:  
+
+ 
+```{r all-code, ref.label=all_labels(), echo=TRUE, eval=FALSE, size="scriptsize", highlight=TRUE}
+```
+ 
